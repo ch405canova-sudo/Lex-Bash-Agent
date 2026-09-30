@@ -15,7 +15,7 @@ less LEX.md                       # this document
 
 # Does the script still run at all?
 bash -n lex                       # syntax
-bash test/run_all.sh              # 7 runners, 514 checks — green as of 2026-09-29 (v0.1.0 + wiki steps 1–20 + browser + mcp + desktop + postgres + live test + full audit)
+bash test/run_all.sh              # 8 runners, 530 checks — green as of 2026-09-30 (v0.1.0 + wiki steps 1–20 + browser + mcp + desktop + postgres + live test + full audit + eval)
 
 # Quick test WITHOUT a server
 echo "Say hello" | LEX_MOCK=done ./lex --oneshot   # → "Works."
@@ -117,7 +117,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 
 | | |
 |---|---|
-| **Binary** | `lex` (one script, 2888 lines) |
+| **Binary** | `lex` (one script, 2992 lines) |
 | **Backend** | local llama-server, OpenAI protocol, `http://127.0.0.1:8080/v1/chat/completions` |
 | **Model** | `Ternary-Bonsai-2-27B-PQ2_0.gguf` (alias=`--alias` possible) |
 | **Language** | English-first — system prompt, docs, answers |
@@ -181,7 +181,8 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 - **Session JSONL** (append-only, one message per line; `reasoning_content` is persisted but **not** written into the model context)
 - **Memory** under `~/.lex/mem/` (Markdown + YAML frontmatter, types `memory|fact|preference|note`)
 - **Security**: hard deny list in `tool_bash` (always on) + opt-in `--approve` (TTY only) + **sudo gate** (§6 #13: exactly one prompt, password straight to sudo)
-- **Tests**: 7 test files + `fake_server.sh` + `fake_mcp.sh`, **514 checks** (507 individual + 7 runner marks), `bash test/run_all.sh` → **PASS: 7  FAIL: 0  TOTAL: 7** (exit 0)
+- **Tests**: 8 test files + `fake_server.sh` + `fake_mcp.sh`, **530 checks** (522 individual + 8 runner marks), `bash test/run_all.sh` → **PASS: 8  FAIL: 0  TOTAL: 8** (exit 0)
+- **Observability** (step 26, 2026-09-30): every tool run is appended as one JSONL line to `<log-dir>/spans.jsonl` (`span_log()`, `_ms_now()` guards the GNU-only `date +%N`), `dispatch_tool()` times each branch and records `ok` from its exit status; `cmd_eval()` aggregates the trace (count, total duration, failure verdict, per tool, latest 10 spans) via **`lex --eval [spans-file]`**
 - **Debug proxy** `tools/llama-proxy.sh` (2026-09-28): forwards requests to the llama-server and logs request/response (`start|stop|status|tail|show`), logs in `.proxy/` (gitignored). Binds **127.0.0.1 only**, port 8080 is rejected
 - **2 live requests (approved)**: first direct (`Works.`), second **via the proxy** → confirmed `reasoning_budget_tokens: 4096`, `max_tokens: 8192`, 8 tools, `finish=stop`
 - **Mutation tests**: deny list / session / `edit_file all` each broken individually → `test_features.sh` red (the tests are not vacuous)
@@ -189,10 +190,10 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 - **Palette (step 14)**: colors go through variables (`_palette_init`) → `NO_COLOR`/`TERM=dumb` switch everything off; H1 bold+**underline** instead of "white" (readable on a light background), H3 cyan, thinking content **grey instead of italic**
 - **Git**: repository initialized, commits `46c64c0` → `1faafaf` → `9c3f4e9`, tag **v0.1.0**, working tree clean
 
-### Tree (status 2026-09-28)
+### Tree (status 2026-09-30)
 ```
 <repo>/
-├── lex                        ✅ 2888 lines, shellcheck-clean
+├── lex                        ✅ 2992 lines, shellcheck-clean
 ├── LEX.md                     ✅ this document
 ├── README.md                  ✅
 ├── CHANGELOG.md               ✅
@@ -202,20 +203,21 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 ├── .gitignore                 ✅
 ├── .github/workflows/ci.yml   ✅ bash -n + shellcheck (incl. tools/) + run_all.sh + hygiene check
 ├── tools/llama-proxy.sh       ✅ debug proxy (start|stop|status|tail|show), 127.0.0.1 only
-├── test/run_all.sh            ✅ 7 runners, green
+├── test/run_all.sh            ✅ 8 runners, green
 ├── test/test_input.sh         ✅ 10 checks (CLI modes, mock sequence)
 ├── test/test_tools.sh         ✅ 15 checks (5 tools + safe_path + dispatch)
 ├── test/test_loop.sh          ✅ 9 checks (run_turn, finish_reason, max_turns)
 ├── test/test_http.sh          ✅ 2 checks (real curl path, fake server)
 ├── test/test_features.sh      ✅ 317 checks (spec, deny, approve, wiki steps 1–10, todo session-independent, readability, review fixes)
 ├── test/test_proxy.sh         ✅ 26 checks (pass-through, logging, 502, 8080 block)
+├── test/test_eval.sh          ✅ 15 checks (span log, dispatch instrumentation, cmd_eval, --eval)
 ├── test/fake_server.sh        ✅ ncat helper on a high port, never 8080
 ├── test/fake_mcp.sh           ✅ minimal MCP server (stdio/JSON-RPC) for the MCP tests
 └── Dockerfile                 ⛔ dropped (decision 2026-09-28: lex has nothing to do with Docker)
 ```
 
-**Verified 2026-09-29**: `bash test/run_all.sh` → **PASS: 7  FAIL: 0  TOTAL: 7**
-(514 checks green, exit 0) · `shellcheck -S warning lex test/*.sh tools/*.sh` → 0.
+**Verified 2026-09-30**: `bash test/run_all.sh` → **PASS: 8  FAIL: 0  TOTAL: 8**
+(530 checks green, exit 0) · `shellcheck -S warning lex test/*.sh tools/*.sh` → 0.
 
 ---
 
@@ -239,7 +241,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 
 ---
 
-## 5. Architecture of the script (`lex`, 2888 lines, status 2026-09-29)
+## 5. Architecture of the script (`lex`, 2992 lines, status 2026-09-30)
 
 | Function | Line | Task |
 |---|---|---|
@@ -248,43 +250,45 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 | `_int_or()` / `_float_or()` / `_copy_mode()` | 170 / 176 / 184 | step 14: defuse numeric config values (otherwise `(( ))` abort), copy the template file mode to temp files |
 | `load_config()` | 194 | 4-tier: defaults → `~/.lex/settings.json` → `.lex/settings.json` (CWD) → ENV (incl. `LEX_APPROVE/LEX_SESSION/LEX_MEM_DIR`) **+ numeric validation** |
 | `log()` | 248 | append-only to `$_log_dir/lex.log` |
-| `_system_prompt` | 259 | English-first **incl. the personality block (step 7)** — always English, stay brief, never guess, capture errors, wiki as memory — plus **17 tools**, wiki conventions and planning discipline; **anti-doubt (step 15)**: decide firmly, verify via tools instead of introspection, no doubt loops |
-| `session_init()` / `session_write()` | 330 / 347 | session id + header line, append-only JSONL |
-| `append_message_json()` / `append_message()` / `setup_messages()` | 355 / 375 / 407 | message into the context array **and** as a JSONL record (with optional `reasoning`), JSON array as a string, jq-based |
-| `_build_tools()` | 436 | OpenAI tool schemas (17 tools, `edit_file.all` as `boolean`) |
-| `call_api()` | 458 | mock file (shadow) → static mock → `curl` + `jq -n` body, URL **at runtime** |
-| `safe_path()` | 524 | deny list for `/etc /usr /bin /sbin /boot /dev /proc /sys /var /lib /lib64 /root` — **including bare roots** (`/etc`, not only `/etc/…`) and **symlink targets** (step 14) |
-| `tool_read_file()` / `tool_write_file()` / `tool_edit_file()` | 553 / 574 / 615 | file tools (`edit_file` with `all`, counts occurrences; temp file since step 14 **in the target directory**, mode kept) |
-| `_bash_segments()` / `_rm_targets_catastrophic()` / `_su_is_command()` / `_bash_denied()` | 693 / 709 / 760 / 782 | **hard deny list** (always on): split the command into segments, rm target check over tokens (`rm -rf -- /`, `sudo rm -rf /`, `xargs rm -rf /`), `curl \| sh` over **all** segments (`…\ \| sh \| cat`, `… && sh`), `su` as a command word (`su postgres -c`); plus block devices, fork bomb, reboot, `chmod -R 777 /`, `history -c`; `sudo` runs through `_sudo_gate()` |
-| `_approve_request()` | 850 | opt-in approval (TTY only) |
-| `_needs_sudo()` / `_sudo_ask()` / `_sudo_gate()` | 872 / 892 / 904 | **sudo gate (§6 #13)**: detect `su` patterns, check the ticket (`sudo -n`), without a ticket **one** prompt on the TTY (`sudo -v`, password straight to sudo), with a ticket y/N; the reason ends up in `_sudo_gate_reason` instead of on stdout |
-| `tool_bash()` | 925 | deny list → sudo gate/approval → execution with `_run_limited`, `</dev/null`, truncation |
-| `tool_list_files()` | 962 | directory listing |
-| `tool_append_file()` / `tool_search()` | 1015 / 1032 | wiki workbench (step 1): append-only writes, full-text search (`grep -rIn`, literal/regex, glob, 200-hit cap) |
-| `_todo_file()` / `tool_todo()` | 1082 / 1086 | step 2 + addendum: plan under `${_lex_home}/plans/` — **session-independent** (`plan.md`), `done` idempotent, index = display position |
-| `_hist_init()` / `_hist_add()` | 1192 / 1209 | step 6: read history `~/.lex/history` (500 entries), `set -o emacs` + `bind` |
-| `_html_to_text()` / `tool_fetch()` / `_html_decode()` | 1229 / 1324 / 1320 | step 4: ingest into `raw/<topic>/`, HTML→plaintext via awk, metadata header, collision suffixes |
-| `_mem_valid_type()` / `_mem_slug()` | 1435 / 1440 | type whitelist, filename from the heading |
-| `_mcp_config()` / `_mcp_argv()` / `_mcp_wait()` / `_mcp_send()` / `_mcp_call()` | 1454 / 1469 / 1482 / 1513 / 1528 | step 9: MCP client for **stdio** — servers from `${LEX_HOME:-$HOME/.lex}/mcp.json` (otherwise defaults), handshake `initialize` → `notifications/initialized` → `tools/call`, answer filtering by `id`, connection timeout separated from read timeout; step 14: `_mcp_send()` detects servers **dead at startup** (coproc fd) and reports "not startable" instead of failing |
-| `tool_web_fetch()` / `tool_context7()` | 1680 / 1699 | step 9: crawler excerpt via defuddle (no storage), context7 two-stage (`resolve-library-id` → `query-docs`) incl. library suggestion |
-| `tool_browser()` | 1770 | step 22: playwright MCP against system Chrome — navigate/snapshot/click/type by ref (accessibility instead of vision), **no write gate**, output cap |
-| `tool_mcp()` | 1857 | step 23: generic MCP access — discovery (tools/list via `_mcp_call … list`) + tools/call, server/tool error messages, output cap |
-| `_ddg_parse()` / `tool_web_search()` | 1883 / 1948 | step 10: DuckDuckGo evaluation in awk (title/URL/snippet, `uddg=` decoding via a byte table, entities, max 10 hits) plus `curl` with `LEX_SEARCH_URL` |
-| `tool_mem_add()` / `tool_mem_list()` / `tool_mem_search()` | 1966 / 1996 / 2018 | memory (spec §6.4) |
-| `dispatch_tool()` | 2037 | case map name → tool (17 entries) **+ mandatory JSON object as the argument** (otherwise the jq error message lands in the context) |
-| `_palette_init()` / `_prompt()` | 2174 / 2190 | **step 14**: color palette via variables (`NO_COLOR`/`TERM=dumb` → empty), prompt `lex>` only colored on a TTY |
-| `_hint_args()` | 2204 | compact argument hint for the trace (70 chars) |
-| `_spin_start()` / `_spin_stop()` | 2217 / 2238 | step 6: `⏳ thinking …` spinner on stderr, only after 250 ms, a flag file prevents whitespace; `trap … EXIT` (step 14) |
-| `_trace_result()` / `_trace_reasoning()` / `_trace_rule()` / `_trace_line()` / `_trace_hud()` | 2257 / 2281 / 2301 / 2306 / 2312 | step 6 + 13 + 14: tool return (8 lines/600 chars, `↳` cyan-dim), `⚙ thinking:` block (header dim-magenta, content **grey `90`** + indent instead of italic), separator, `⚙ tool args` (name bold cyan), HUD — all via the palette |
-| `_md_render()` / `render_markdown()` | 2327 / 2522 | step 3 + 8 + 13 + 14: markdown light (headings, `**bold**`, `` `code` ``, `[[wikilinks]]`, quotes, warning/error/success/links/list markers, **pipe tables**); step 14: **H1 bold+underline** (instead of "white" → readable on light backgrounds), H2 bold cyan, H3 cyan, `NO_COLOR`/`TERM=dumb` → raw |
-| `run_turn()` | 2528 | **the loop**: user → API → parse → at `tool_count==0` print and `return 0`, otherwise run the tools and continue; writes `reasoning` only into the session; step 14: **guard** on invalid/empty API answers (context stays intact) |
-| `server_hint()` | 2677 | port check via `ss` at REPL start — **no** HTTP request; collect the ss output first (pipefail/rc 141, step 14) |
-| `cmd_status()` | 2692 | `/status` display (model, API, tools, session, memory, turns) |
-| `agent_loop()` | 2722 | REPL (`while [[ -t 0 ]]`), slash commands `/status`, `/help`, prompt via `_prompt()` |
-| `oneshot()` | 2757 | stdin → `run_turn` (also `/status`, `/help`) |
-| `install_lex()` | 2773 | create `~/.lex/` (`mem/`, not `mem_net/`) + settings template |
-| `usage()` | 2793 | help incl. security note |
-| `main()` | 2837 | `--oneshot --approve --status --install --version --help` |
+| `_ms_now()` / `span_log()` | 261 / 273 | millisecond clock (`date +%N` is GNU-only → guarded, falls back to whole seconds) + span record: one JSONL line per tool run into `<log-dir>/spans.jsonl` (`ts`, `name`, `args_hash`, `duration_ms`, `ok`) |
+| `_system_prompt` | 294 | English-first **incl. the personality block (step 7)** — always English, stay brief, never guess, capture errors, wiki as memory — plus **17 tools**, wiki conventions and planning discipline; **anti-doubt (step 15)**: decide firmly, verify via tools instead of introspection, no doubt loops |
+| `session_init()` / `session_write()` | 365 / 382 | session id + header line, append-only JSONL |
+| `append_message_json()` / `append_message()` / `setup_messages()` | 390 / 410 / 442 | message into the context array **and** as a JSONL record (with optional `reasoning`), JSON array as a string, jq-based |
+| `_build_tools()` | 471 | OpenAI tool schemas (17 tools, `edit_file.all` as `boolean`) |
+| `call_api()` | 493 | mock file (shadow) → static mock → `curl` + `jq -n` body, URL **at runtime** |
+| `safe_path()` | 559 | deny list for `/etc /usr /bin /sbin /boot /dev /proc /sys /var /lib /lib64 /root` — **including bare roots** (`/etc`, not only `/etc/…`) and **symlink targets** (step 14) |
+| `tool_read_file()` / `tool_write_file()` / `tool_edit_file()` | 588 / 609 / 650 | file tools (`edit_file` with `all`, counts occurrences; temp file since step 14 **in the target directory**, mode kept) |
+| `_bash_segments()` / `_rm_targets_catastrophic()` / `_su_is_command()` / `_bash_denied()` | 728 / 744 / 795 / 817 | **hard deny list** (always on): split the command into segments, rm target check over tokens (`rm -rf -- /`, `sudo rm -rf /`, `xargs rm -rf /`), `curl \| sh` over **all** segments (`…\ \| sh \| cat`, `… && sh`), `su` as a command word (`su postgres -c`); plus block devices, fork bomb, reboot, `chmod -R 777 /`, `history -c`; `sudo` runs through `_sudo_gate()` |
+| `_approve_request()` | 885 | opt-in approval (TTY only) |
+| `_needs_sudo()` / `_sudo_ask()` / `_sudo_gate()` | 907 / 927 / 939 | **sudo gate (§6 #13)**: detect `su` patterns, check the ticket (`sudo -n`), without a ticket **one** prompt on the TTY (`sudo -v`, password straight to sudo), with a ticket y/N; the reason ends up in `_sudo_gate_reason` instead of on stdout |
+| `tool_bash()` | 960 | deny list → sudo gate/approval → execution with `_run_limited`, `</dev/null`, truncation |
+| `tool_list_files()` | 997 | directory listing |
+| `tool_append_file()` / `tool_search()` | 1050 / 1067 | wiki workbench (step 1): append-only writes, full-text search (`grep -rIn`, literal/regex, glob, 200-hit cap) |
+| `_todo_file()` / `tool_todo()` | 1117 / 1121 | step 2 + addendum: plan under `${_lex_home}/plans/` — **session-independent** (`plan.md`), `done` idempotent, index = display position |
+| `_hist_init()` / `_hist_add()` | 1227 / 1244 | step 6: read history `~/.lex/history` (500 entries), `set -o emacs` + `bind` |
+| `_html_to_text()` / `tool_fetch()` / `_html_decode()` | 1264 / 1359 / 1355 | step 4: ingest into `raw/<topic>/`, HTML→plaintext via awk, metadata header, collision suffixes |
+| `_mem_valid_type()` / `_mem_slug()` | 1470 / 1475 | type whitelist, filename from the heading |
+| `_mcp_config()` / `_mcp_argv()` / `_mcp_wait()` / `_mcp_send()` / `_mcp_call()` | 1489 / 1504 / 1517 / 1548 / 1563 | step 9: MCP client for **stdio** — servers from `${LEX_HOME:-$HOME/.lex}/mcp.json` (otherwise defaults), handshake `initialize` → `notifications/initialized` → `tools/call`, answer filtering by `id`, connection timeout separated from read timeout; step 14: `_mcp_send()` detects servers **dead at startup** (coproc fd) and reports "not startable" instead of failing |
+| `tool_web_fetch()` / `tool_context7()` | 1715 / 1734 | step 9: crawler excerpt via defuddle (no storage), context7 two-stage (`resolve-library-id` → `query-docs`) incl. library suggestion |
+| `tool_browser()` | 1805 | step 22: playwright MCP against system Chrome — navigate/snapshot/click/type by ref (accessibility instead of vision), **no write gate**, output cap |
+| `tool_mcp()` | 1892 | step 23: generic MCP access — discovery (tools/list via `_mcp_call … list`) + tools/call, server/tool error messages, output cap |
+| `_ddg_parse()` / `tool_web_search()` | 1918 / 1983 | step 10: DuckDuckGo evaluation in awk (title/URL/snippet, `uddg=` decoding via a byte table, entities, max 10 hits) plus `curl` with `LEX_SEARCH_URL` |
+| `tool_mem_add()` / `tool_mem_list()` / `tool_mem_search()` | 2001 / 2031 / 2053 | memory (spec §6.4) |
+| `dispatch_tool()` | 2072 | case map name → tool (17 entries) **+ mandatory JSON object as the argument** (otherwise the jq error message lands in the context); **span instrumentation (step 26)**: `_t0` before the case, `_rc=$?` after `esac` + `span_log … "$_ok"` + `return "$_rc"` |
+| `_palette_init()` / `_prompt()` | 2221 / 2237 | **step 14**: color palette via variables (`NO_COLOR`/`TERM=dumb` → empty), prompt `lex>` only colored on a TTY |
+| `_hint_args()` | 2251 | compact argument hint for the trace (70 chars) |
+| `_spin_start()` / `_spin_stop()` | 2264 / 2285 | step 6: `⏳ thinking …` spinner on stderr, only after 250 ms, a flag file prevents whitespace; `trap … EXIT` (step 14) |
+| `_trace_result()` / `_trace_reasoning()` / `_trace_rule()` / `_trace_line()` / `_trace_hud()` | 2304 / 2328 / 2348 / 2353 / 2359 | step 6 + 13 + 14: tool return (8 lines/600 chars, `↳` cyan-dim), `⚙ thinking:` block (header dim-magenta, content **grey `90`** + indent instead of italic), separator, `⚙ tool args` (name bold cyan), HUD — all via the palette |
+| `_md_render()` / `render_markdown()` | 2374 / 2569 | step 3 + 8 + 13 + 14: markdown light (headings, `**bold**`, `` `code` ``, `[[wikilinks]]`, quotes, warning/error/success/links/list markers, **pipe tables**); step 14: **H1 bold+underline** (instead of "white" → readable on light backgrounds), H2 bold cyan, H3 cyan, `NO_COLOR`/`TERM=dumb` → raw |
+| `run_turn()` | 2575 | **the loop**: user → API → parse → at `tool_count==0` print and `return 0`, otherwise run the tools and continue; writes `reasoning` only into the session; step 14: **guard** on invalid/empty API answers (context stays intact) |
+| `server_hint()` | 2724 | port check via `ss` at REPL start — **no** HTTP request; collect the ss output first (pipefail/rc 141, step 14) |
+| `cmd_status()` | 2739 | `/status` display (model, API, tools, session, memory, turns) |
+| `agent_loop()` | 2769 | REPL (`while [[ -t 0 ]]`), slash commands `/status`, `/help`, prompt via `_prompt()` |
+| `oneshot()` | 2804 | stdin → `run_turn` (also `/status`, `/help`) |
+| `install_lex()` | 2820 | create `~/.lex/` (`mem/`, not `mem_net/`) + settings template |
+| `usage()` | 2840 | help incl. security note |
+| `cmd_eval()` | 2888 | **trace-level report** over `spans.jsonl`: count, total duration, failure verdict, per-tool aggregation, latest 10 spans; entry point `lex --eval [file]`, documented in `--help` |
+| `main()` | 2924 | `--oneshot --approve --eval --status --install --version --help` |
 | `_wiki_dir` (`LEX_WIKI_DIR`) | 42 | root of the project wiki, default `~/.lex/wiki`, visible in `/status` |
 
 **Loop invariant**: the loop is never rewritten — mechanisms come on top (learn-claude-code s01/s02).
@@ -516,6 +520,8 @@ User task: "please optimize it and look over it again entirely, whether you find
 34. **Live test of all integrations (2026-09-29, user approval "everything incl. real LLM turns")**: carried out on the real environment (Wayland/GNOME, system Chrome, user-space Postgres). **Live proofs:** Postgres ✓ (`tool_mcp postgres`: `__tools` → real dbhub list, `execute_sql` CREATE/INSERT/UPDATE/SELECT → count `live`=4, `search_objects`), Desktop ✓ (`list_apps` → real AT-SPI tree), `web_fetch`/defuddle ✓ (Wikipedia plaintext), `context7` ✓ (curl docs), browser full cycle in **one** session: navigate → snapshot → type+Enter (search lands on `/wiki/Pipeline`) → click (ref from a fresh snapshot → `Brian Fox`) → back → wait → snapshot → tabs/close. **Three real LLM turns** over `./lex --oneshot` against 8080: (1) browser navigate+snapshot → title + H1 with correct refs and the ref rule obeyed, (2) Postgres discovery+SQL with self-correction ("live" instead of the guessed table), (3) browser turn with **five** dispatches up to the click — only this turn exposed L4 (E2BIG). **Findings L1–L5 fixed** (§6 "Fixed 2026-09-29"): MCP session subshell, ref decay (+`wait` action + prompt rule), `target` schema, `curl -d @file` against E2BIG, Chrome CDP service; `web_search` = external DDG anti-bot finding (only reported). **TEST (+13 → 485)**, `lex` 2585 → **2683 lines**, §5 map unchanged (78/78) — **✅ LIVE 2026-09-29**
 35. **Full audit: limits + code review (2026-09-29, user: "check that everything works as planned, raise the limits so the agent does not abort on big tasks, find and fix bugs in the whole code")**: inventory of all abort/truncation points (limits report) + sub-agent code review (bug report), then **four waves** carried out — wave 1 limits/E2BIG (G1–G4), wave 2 security P1s (R1–R2: home-deny gap, download bypasses), wave 3 P2s (R3–R7), wave 4 P3s (R8–R12). Every wave: `bash -n` + shellcheck + `run_all.sh` green. Details in §6 "Fixed 2026-09-29 — full audit". `--status` now shows `nudges`; smoke: `budget 8192 max_tokens 16384 max_turns 200 timeout 300s`. Deliberately **not** built: compaction (→ §6 open O6). **TEST (+29 → 514)**, `lex` 2683 → **2884 lines** — **✅ VERIFY 2026-09-29**
 
+36. **Step 26 — observability: span-level logging + `lex --eval` (2026-09-30, source: the wiki article `web-intelligence`)**: finding — five of six layers (search, evidence, answer, memory, wiki) existed, the sixth (**observability/evaluation**) did not; no way to see how often a tool ran, how long it took or what failed. Built: `span_log()` writes **one JSONL line per tool run** into `<log-dir>/spans.jsonl` (`ts`, `name`, `args_hash`, `duration_ms`, `ok`) with a jq-less TSV fallback; `_ms_now()` guards the GNU-only `date +%N` (rule C: no GNU-only call without a fallback) and `dispatch_tool()` times every branch, taking `ok` from the branch exit status **after** `esac` (`return "$_rc"` keeps the tool's own status, the unknown-tool branch logs before `return 1`); `cmd_eval()` renders the **trace-level report** (count, total duration, `FAILED: n of m` / `OK` verdict, per-tool aggregation, latest 10 spans) and is reachable as `lex --eval [spans-file]` (documented in `--help`, works without `load_config`). **TEST (+15 → 522 individual; new runner `eval`, 8 runners → 530 checks)**: span_log JSONL/ok, dispatch success + failure path, cmd_eval valid/empty/missing file, `lex --eval` CLI. **VERIFY:** `bash -n` ✓ · shellcheck (single file) = 0 · `./test/run_all.sh` → **PASS: 8  FAIL: 0  TOTAL: 8**, `lex` 2888 → **2992 lines**, §5 map re-pulled — **✅ BUILD 2026-09-30**
+
 ## 8. Research agenda (prioritized, status 2026-09-28)
 
 ### A. Model capability — BIGGEST RISK
@@ -588,14 +594,14 @@ How does Bash count tokens (no tokenizer)? When does compaction kick in? Clarify
 | Path | Content |
 |---|---|
 | `LEX.md` | **this file — the single source of truth** |
-| `lex` | the script (2888 lines, 17 tools) |
+| `lex` | the script (2992 lines, 17 tools) |
 | `README.md` / `CHANGELOG.md` / `LICENSE` | docs + MIT license (2026-09-28) |
 | `ai.sh` | llama-server manager (path-free, env-driven) |
 | `install.sh` | interactive installer (deps → `lex --install` → symlinks) |
 | `.github/workflows/ci.yml` | CI: `bash -n` + shellcheck + `run_all.sh` + installer smoke test + hygiene |
 | `tools/llama-proxy.sh` | **debug proxy** (`start\|stop\|status\|tail\|show`), logs in `.proxy/` |
-| `test/run_all.sh` | test runners (**7 runners**: syntax/input/tools/loop/http/features/proxy, green) |
-| `test/test_input.sh` … `test_proxy.sh` | 7 test files, **514 checks** (507 individual + 7 runner marks) |
+| `test/run_all.sh` | test runners (**8 runners**: syntax/input/tools/loop/http/features/proxy/eval, green) |
+| `test/test_input.sh` … `test_eval.sh` | 8 test files, **530 checks** (522 individual + 8 runner marks) |
 | `test/fake_mcp.sh` | minimal MCP server (stdio/JSON-RPC) for steps 9 + 22 + 23 + 24 + 25 |
 | `test/fake_server.sh` | fake server (ncat, high port) for the curl path |
 

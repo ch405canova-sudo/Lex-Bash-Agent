@@ -254,6 +254,41 @@ log() {
 }
 
 # ---------------------------------------------------------------------------
+# Span-level logging (2026-09-30, observability): every tool run is written
+# as one JSONL line to <log-dir>/spans.jsonl — the minimal form of
+# "observability + evaluation" (the 6th of 6 layers, Future AGI 2026).
+# ---------------------------------------------------------------------------
+_ms_now() {
+  # `date +%N` is GNU-only — fall back to whole seconds elsewhere (rule C,
+  # no GNU-only call without a guard), otherwise the arithmetic below breaks.
+  local n
+  n="$(date +%s%N 2>/dev/null)"
+  if [[ "$n" =~ ^[0-9]{9,}$ ]]; then
+    printf '%s' $(( n / 1000000 ))
+  else
+    printf '%s' $(( $(date +%s 2>/dev/null || printf 0) * 1000 ))
+  fi
+}
+
+span_log() {
+  local name="$1" args="$2" duration_ms="$3" ok="$4"
+  local ts args_hash
+  ts="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  mkdir -p "$_log_dir" 2>/dev/null || return 0
+  # Short checksum of the arguments keeps the line small (no payload).
+  args_hash="$(printf '%s' "$args" | cksum | cut -c1-8)"
+  [[ "$duration_ms" =~ ^[0-9]+$ ]] || duration_ms=0
+  jq -cn --arg ts "$ts" --arg name "$name" --arg args_hash "$args_hash" \
+     --argjson duration_ms "$duration_ms" --argjson ok "$ok" \
+     '{ts:$ts,name:$name,args_hash:$args_hash,duration_ms:$duration_ms,ok:$ok}' \
+    >> "${_log_dir}/spans.jsonl" 2>/dev/null || {
+      # Fallback without jq: plain TSV
+      printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$name" "$args_hash" "$duration_ms" "$ok" \
+        >> "${_log_dir}/spans.jsonl" 2>/dev/null || true
+    }
+}
+
+# ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
 _system_prompt="You are Lex — a locally running terminal agent: alert, direct, English-speaking. You think briefly, act precisely and never guess.
@@ -2047,6 +2082,10 @@ dispatch_tool() {
     echo "Error: tool arguments are not a JSON object: $(printf '%.120s' "$args")"
     return 1
   fi
+  # Span-level log (2026-09-30): the start stamp is taken before the case,
+  # $? right after `esac` is the exit status of the branch that just ran.
+  local _t0 _t1 _rc _ok
+  _t0="$(_ms_now)"
   case "$name" in
     read_file)
       path="$(jq -r '.path // empty' <<< "$args")"
@@ -2144,9 +2183,17 @@ dispatch_tool() {
       ;;
     *)
       echo "Unknown tool: $name"
+      _t1="$(_ms_now)"
+      span_log "$name" "$args" $(( _t1 - _t0 )) false
       return 1
       ;;
   esac
+  # Span: duration + ok. `$?` after the case is the tool's own exit status.
+  _rc=$?
+  _t1="$(_ms_now)"
+  if (( _rc == 0 )); then _ok=true; else _ok=false; fi
+  span_log "$name" "$args" $(( _t1 - _t0 )) "$_ok"
+  return "$_rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -2799,6 +2846,7 @@ Modes:
   lex --oneshot       single shot (stdin -> stdout, exit)
   lex --approve       REPL, every bash run is confirmed first (TTY needed)
   lex --status        config and runtime status
+  lex --eval [file]   trace report from the span log (spans.jsonl)
   lex --install       create ~/.lex/ + settings.json
   lex --version       show version
   lex --help          this help
@@ -2832,16 +2880,64 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Trace-level evaluation (2026-09-30):
+#   lex --eval [spans-file]   report from spans.jsonl
+#   span-level  = one line per tool call (tool, args hash, duration, ok)
+#   trace-level = aggregation: count, per tool, failures, duration, verdict
+# ---------------------------------------------------------------------------
+cmd_eval() {
+  local dir="${LEX_LOG_DIR:-${_lex_home}/log}"
+  local file="${1:-${dir}/spans.jsonl}"
+  if [[ ! -f "$file" ]]; then
+    echo "No span log found ($file)."
+    return 0
+  fi
+  local total fails sum_ms total_ms verdict
+  total=$(jq -s 'length' "$file" 2>/dev/null)
+  [[ "${total:-}" =~ ^[0-9]+$ ]] || total=0
+  fails=$(jq -s '[.[] | select(.ok == false)] | length' "$file" 2>/dev/null)
+  [[ "${fails:-}" =~ ^[0-9]+$ ]] || fails=0
+  sum_ms=$(jq -s '[.[].duration_ms] | add // 0' "$file" 2>/dev/null)
+  [[ "${sum_ms:-}" =~ ^[0-9]+$ ]] || sum_ms=0
+  total_ms=$(( sum_ms / 1000 ))
+  if (( fails > 0 )); then
+    verdict="FAILED: $fails of $total tool calls failed"
+  else
+    verdict="OK: $total tool calls, 0 failures"
+  fi
+  printf '=== Trace-level evaluation (lex --eval) ===\n'
+  printf 'Spans file: %s\n' "$file"
+  printf 'Tool calls: %s (total duration: %ss)\n' "$total" "$total_ms"
+  printf '%s\n' "$verdict"
+  printf '\nPer tool:\n'
+  jq -s -r 'group_by(.name) | map(. as $g | $g[0].name + ": " + ((map(.duration_ms) | add // 0) | tostring) + "ms, " + ((map(select(.ok==false)) | length) | tostring) + " failures") | .[]' "$file" 2>/dev/null | while IFS= read -r line; do
+    printf '  %s\n' "$line"
+  done
+  printf '\nLatest 10 spans:\n'
+  tail -n 10 "$file" 2>/dev/null | jq -r '.ts + " " + .name + " " + (.duration_ms|tostring) + "ms " + (if .ok then "ok" else "failed" end)' 2>/dev/null
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
   # Flags in any order (P2, review 2026-09-29): previously only
   # only `lex --approve …`, but not `lex --status --approve`.
-  local cmd=""
+  local cmd="" _eval_file=""
   while (( $# > 0 )); do
     case "$1" in
       --approve)
         _approve=1
+        ;;
+      --eval)
+        cmd="--eval"
+        shift
+        # optional positional argument: spans file
+        if (( $# > 0 )); then
+          _eval_file="$1"
+          shift
+        fi
         ;;
       *)
         if [[ -n "$cmd" ]]; then
@@ -2863,6 +2959,14 @@ main() {
       _need_model=0
       load_config || exit 1
       cmd_status
+      ;;
+    --eval)
+      _lex_home="${LEX_HOME:-$HOME/.lex}"
+      if [[ -n "${_eval_file:-}" ]]; then
+        cmd_eval "$_eval_file"
+      else
+        cmd_eval
+      fi
       ;;
     --install)
       install_lex

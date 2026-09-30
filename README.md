@@ -298,7 +298,7 @@ Important ENV variables: `LEX_API_URL`, `LEX_MODEL`, `LEX_MAX_TOKENS`,
 ## Tests
 
 ```bash
-./test/run_all.sh          # 7 runners / 514 checks, exit 0 only when all are green
+./test/run_all.sh          # 8 runners / 530 checks, exit 0 only when all are green
 shellcheck -S warning lex ai.sh install.sh test/*.sh tools/*.sh
 ```
 
@@ -308,6 +308,34 @@ untouched) or the bundled fake server (`test/fake_server.sh`). A real
 request to `127.0.0.1:8080` never happens in the tests. The MCP tests
 run against `test/fake_mcp.sh` (minimal stdio server), the search tests
 against a local `python3 -m http.server` with a fixture.
+
+## Observability (`lex --eval`)
+
+Every tool run is appended as one JSONL line to `<log-dir>/spans.jsonl`
+(`ts`, `name`, `args_hash`, `duration_ms`, `ok`) — the span-level layer.
+`cmd_eval()` aggregates that log into a trace-level report:
+
+```bash
+./lex --eval                    # report over ~/.lex/log/spans.jsonl
+./lex --eval <file>             # a specific span file
+cat ~/.lex/log/spans.jsonl      # raw spans
+```
+
+```
+=== Trace-level evaluation (lex --eval) ===
+Spans file: ~/.lex/log/spans.jsonl
+Tool calls: 4 (total duration: 0s)
+FAILED: 1 of 4 tool calls failed
+
+Per tool:
+  bash: 170ms, 1 failures
+  read_file: 25ms, 0 failures
+```
+
+The timing comes from `_ms_now()` (millisecond clock, falls back to whole
+seconds where `date +%N` is not available), `ok` is the exit status of the
+tool branch that just ran. The file is created on the first tool call —
+until then `lex --eval` reports "No span log found".
 
 ## Debug proxy (read the traffic)
 
@@ -326,12 +354,12 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 2888 lines, 17 tools
+lex              the agent — one file, 2992 lines, 17 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)
 tools/           llama-proxy.sh (debug proxy to the llama-server)
-test/            run_all.sh + 7 test files + fake_server.sh + fake_mcp.sh
+test/            run_all.sh + 8 test files + fake_server.sh + fake_mcp.sh
 .github/         CI (shellcheck + run_all.sh + installer smoke test)
 ```
 

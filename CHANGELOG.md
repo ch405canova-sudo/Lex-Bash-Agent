@@ -8,6 +8,17 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
 ### Added
 
+- **Observability: span-level logging + `lex --eval` (2026-09-30):**
+  every tool run is appended as one JSONL line to `<log-dir>/spans.jsonl`
+  (`span_log()`; `ts`, `name`, `args_hash`, `duration_ms`, `ok`).
+  `dispatch_tool()` times each branch and takes `ok` from its exit status
+  (`return "$_rc"` keeps the tool's own status). `_ms_now()` guards the
+  GNU-only `date +%N`. `cmd_eval()` renders the trace-level report
+  (count, total duration, `FAILED: n of m` / `OK` verdict, per-tool
+  aggregation, latest 10 spans) via **`lex --eval [spans-file]`** —
+  listed in `--help`, works without `load_config`. New runner
+  `test/test_eval.sh` (+15 checks).
+
 - **Ethical-hacker persona + H-Tools path (step 18):** new system
   prompt block "Role & expertise (ethical hacker)" — the user text
   verbatim (cybersecurity, network security, penetration testing,
@@ -251,6 +262,10 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   the Chrome service for cdp configs via `_ensure_browser()` (PID file
   `$LEX_HOME/browser.pid`). click/type send `target` (= ref id) as
   schema ≥0.0.83 requires.
+
+- **Tests 514 → 530 (7 → 8 runners):** new `eval` runner covers
+  `span_log`, the `dispatch_tool` instrumentation and `cmd_eval`
+  (success path, failure path, empty/missing span file, CLI flag).
 
 - **Limits raised for big tasks (full audit 2026-09-29):**
   defaults `max_tokens` 8192 → **16384**, `reasoning_budget` 4096 →

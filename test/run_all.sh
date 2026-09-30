@@ -35,6 +35,7 @@ run_test "loop"         "$SCRIPT_DIR/test_loop.sh"
 run_test "http"         "$SCRIPT_DIR/test_http.sh"
 run_test "features"     "$SCRIPT_DIR/test_features.sh"
 run_test "proxy"        "$SCRIPT_DIR/test_proxy.sh"
+run_test "eval"         "$SCRIPT_DIR/test_eval.sh"
 
 printf '\n%s\n' "===================================="
 printf 'PASS: %d  FAIL: %d  TOTAL: %d\n' "$PASS" "$FAIL" "$TOTAL"
