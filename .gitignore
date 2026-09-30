@@ -1,0 +1,15 @@
+# Runtime artefacts (belong in ~/.lex, not in the repo)
+*.log
+*.tmp
+*.jsonl
+
+# Editor/OS
+*~
+*.swp
+.DS_Store
+
+# Debug proxy (tools/llama-proxy.sh)
+.proxy/
+
+# Playwright-MCP scratch dir (created on every browser run)
+.playwright-mcp/

@@ -1,0 +1,43 @@
+name: lex CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq ncat shellcheck
+
+      - name: Bash version
+        run: bash --version | head -1
+
+      - name: Syntax (bash -n)
+        run: |
+          bash -n lex
+          for f in ai.sh install.sh test/*.sh tools/*.sh; do bash -n "$f"; done
+
+      - name: shellcheck
+        run: shellcheck -S warning lex ai.sh install.sh test/*.sh tools/*.sh
+
+      - name: Tests
+        run: ./test/run_all.sh
+
+      - name: Installer (headless, prints the steps only)
+        run: ./install.sh
+
+      - name: Hygiene (no leftover test processes)
+        run: |
+          if pgrep -f 'ncat --li[s]ten' >/dev/null 2>&1; then
+            echo "error: test ncat process still alive" >&2
+            exit 1
+          fi
+          echo "clean"
