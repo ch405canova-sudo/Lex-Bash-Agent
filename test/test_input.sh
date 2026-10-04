@@ -36,7 +36,7 @@ assert "version" "lex 0.1.0" "$("$LEX_BIN" --version)"
 
 # 2. --help
 out="$("$LEX_BIN" --help 2>&1)"
-if [[ "$out" == *"lex — a pure-Bash LLM terminal agent"* ]]; then
+if [[ "$out" == *"lex — our own pure-Bash LLM terminal agent"* ]]; then
   printf '  [PASS] help\n'
 else
   printf '  [FAIL] help\n' >&2
@@ -90,6 +90,71 @@ if (( rc == 0 )); then
   printf '  [PASS] pipe without flag (empty input, exit 0)\n'
 else
   printf '  [FAIL] pipe without flag (empty input, exit %s)\n' "$rc" >&2
+  FAIL=1
+fi
+
+# 5c. /exit and /quit end oneshot WITHOUT a model call
+# (review finding 2026-10-01: /exit previously fell through to run_turn — the
+# input cost a request and the answer went nowhere.)
+out="$(printf '/exit' | LEX_MOCK="done" "$LEX_BIN" --oneshot 2>/dev/null)"
+assert "oneshot (/exit without model call)" "" "$out"
+rc=0
+printf '/exit' | LEX_MOCK="done" "$LEX_BIN" --oneshot >/dev/null 2>&1
+rc=$?
+if (( rc == 0 )); then
+  printf '  [PASS] oneshot (/exit, exit 0)\n'
+else
+  printf '  [FAIL] oneshot (/exit, exit %s)\n' "$rc" >&2
+  FAIL=1
+fi
+out="$(printf '/quit' | LEX_MOCK="done" "$LEX_BIN" --oneshot 2>/dev/null)"
+assert "oneshot (/quit without model call)" "" "$out"
+# The same via the pipe path (agent_loop without TTY → oneshot)
+out="$(printf '/exit' | LEX_MOCK="done" "$LEX_BIN" 2>/dev/null)"
+assert "pipe without flag (/exit without model call)" "" "$out"
+
+# 5d. Real REPL under PTY: /exit ends the session without asking the
+# model (monitor: no "Works." from the mock, but a goodbye).
+repl_out="$(printf '/exit\n' | LEX_MOCK="done" LEX_HOME="$TMP" \
+  timeout 30 script -qec "bash '$LEX_BIN'" /dev/null 2>&1 | tr -d '\r')"
+if [[ "$repl_out" == *"Bye!"* ]]; then
+  printf '  [PASS] repl (/exit → Bye!, session closed)\n'
+else
+  printf '  [FAIL] repl (/exit → Bye!): %q\n' "$repl_out" >&2
+  FAIL=1
+fi
+if [[ "$repl_out" != *"Works."* ]]; then
+  printf '  [PASS] repl (/exit without model call)\n'
+else
+  printf '  [FAIL] repl (/exit without model call — the model was asked)\n' >&2
+  FAIL=1
+fi
+
+# 5e. Prompt guarantee (finding 2026-10-03, user report „after tasks only a
+# blinking cursor"): an empty enter must not swallow the prompt.
+# Three empty/text inputs → at least 3 prompt lines in the PTY transcript
+# (initial + one per input). Before the fix it stayed at 2 (continue skipped
+# _prompt).
+repl2_out="$(printf '\n\n/exit\n' | LEX_MOCK="done" LEX_HOME="$TMP" \
+  timeout 30 script -qec "bash '$LEX_BIN'" /dev/null 2>&1 | tr -d '\r')"
+n_prompts="$(printf '%s' "$repl2_out" | grep -o 'lex>' | wc -l | tr -d ' ')"
+if (( n_prompts >= 3 )); then
+  printf '  [PASS] repl (prompt after empty enter: %s× lex>)\n' "$n_prompts"
+else
+  printf '  [FAIL] repl (prompt after empty enter — only %s× lex>)\n' "$n_prompts" >&2
+  FAIL=1
+fi
+# Static anchors: both repair spots must remain in the script.
+if grep -Fq '[[ -z "$input" ]] && { _spin_stop; _prompt; continue; }' "$LEX_BIN"; then
+  printf '  [PASS] repl (anchor: continue path pulls the prompt along)\n'
+else
+  printf '  [FAIL] repl (anchor: continue path pulls the prompt along)\n' >&2
+  FAIL=1
+fi
+if grep -Fq 'while [[ -f "$_spin_flag" ]]; do' "$LEX_BIN"; then
+  printf '  [PASS] repl (anchor: spinner loop has a flag gate)\n'
+else
+  printf '  [FAIL] repl (anchor: spinner loop has a flag gate)\n' >&2
   FAIL=1
 fi
 

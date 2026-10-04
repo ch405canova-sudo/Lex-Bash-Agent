@@ -331,7 +331,7 @@ mode="$(stat -c '%a' "$TMP/wmode.txt" 2>/dev/null || stat -f '%Lp' "$TMP/wmode.t
 assert "write_file (mode stays 644)" "644" "$mode"
 assert "write_file (content overwritten)" "new" "$(cat "$TMP/wmode.txt")"
 ( umask 022; tool_write_file "$TMP/wnew.txt" "fresh" ) >/dev/null 2>&1
-mode="$(stat -c '%a' "$TMP/wnew.txt" 2>/dev/null || stat -f '%Lp' "$TMP/wneu.txt" 2>/dev/null)"
+mode="$(stat -c '%a' "$TMP/wnew.txt" 2>/dev/null || stat -f '%Lp' "$TMP/wnew.txt" 2>/dev/null)"
 assert "write_file (new file 644 with umask 022)" "644" "$mode"
 
 # ---------------------------------------------------------------------------
@@ -502,11 +502,12 @@ _big="$(head -c 150000 /dev/zero | tr '\0' 'x')"
 append_message "tool" "$_big"
 rc_append=$?
 if (( rc_append == 0 )) && jq -e . >/dev/null 2>&1 <<< "$_messages" \
-   && [[ "$_messages" == *"truncated, 150000 bytes total"* ]] \
-   && [[ "$_messages" == *"$(jq -r '.[0].role' <<< "$_before")"* ]]; then
-  printf '  [PASS] append (huge truncation + context kept)\n'
+   && [[ "$(jq -r '.[-1].content | length' <<< "$_messages" 2>/dev/null)" == "150000" ]] \
+   && [[ "$_messages" != *"truncated"* ]] \
+   && [[ "$(jq -r '.[0].role' <<< "$_before")" == "$(jq -r '.[0].role' <<< "$_messages")" ]]; then
+  printf '  [PASS] append (huge message complete + context kept)\n'
 else
-  printf '  [FAIL] append (huge truncation): rc=%s\n' "$rc_append" >&2; FAIL=1
+  printf '  [FAIL] append (huge message): rc=%s\n' "$rc_append" >&2; FAIL=1
 fi
 _snap="$_messages"
 append_message_json '{"broken' >/dev/null 2>&1
@@ -527,6 +528,9 @@ contains "prompt (persona: ethical approach)" "ethical approach" "$_system_promp
 contains "prompt (persona: exploits)" "custom exploits" "$_system_prompt"
 contains "prompt (H-Tools rule: path)" "$HOME/H-Tools" "$_system_prompt"
 contains "prompt (H-Tools rule: no /tmp)" "never /tmp" "$_system_prompt"
+contains "prompt (work framework: blue team)" "Blue-team work is the core business" "$_system_prompt"
+contains "prompt (work framework: working vocabulary)" "working vocabulary, not a reason to refuse" "$_system_prompt"
+contains "prompt (work framework: scope question)" "scope question" "$_system_prompt"
 assert "config (_htools_dir default)" "$HOME/H-Tools" "$_htools_dir"
 out="$(LEX_HTOOLS_DIR=/tmp/ht-override bash -c 's="$1"; shift
 source "$s" </dev/null >/dev/null 2>&1; printf %s "$_htools_dir"' _ "$LEX_BIN")"
@@ -593,6 +597,8 @@ out="$(printf '/plan' | LEX_MOCK="done" "$LEX_BIN" --oneshot 2>/dev/null)"
 contains "/plan (shows plan)" "Plan" "$out"
 out="$(printf '/help' | LEX_MOCK="done" "$LEX_BIN" --oneshot 2>/dev/null)"
 contains "/help (mentions /plan)" "/plan" "$out"
+contains "/help (mentions /exit)" "/exit" "$out"
+contains "/help (mentions /server)" "/server" "$out"
 
 # ---------------------------------------------------------------------------
 # Addendum — todo is session independent (decision 2026-09-28)
@@ -664,13 +670,14 @@ if grep -q '⏱' "$TMP/err.trace"; then printf '  [PASS] trace (HUD with time)\n
 else printf '  [FAIL] trace (HUD with time)\n' >&2; FAIL=1; fi
 if grep -Eq 'turn [0-9]+/' "$TMP/err.trace"; then printf '  [PASS] trace (HUD with turn counter)\n'
 else printf '  [FAIL] trace (HUD with turn counter)\n' >&2; FAIL=1; fi
-if grep -q 'tokens 1409 prompt + 69 completion' "$TMP/err.trace"; then
-  printf '  [PASS] trace (HUD with token counter)\n'
+# Step 42 (2026-10-02): HUD shows the context with a limit: tokens X/Y (Z%)
+if grep -q 'tokens 1409/262144 (0%) prompt + 69 completion' "$TMP/err.trace"; then
+  printf '  [PASS] trace (HUD with token counter + ctx)\n'
 else
-  printf '  [FAIL] trace (HUD with token counter): %s\n' "$(cat "$TMP/err.trace")" >&2; FAIL=1
+  printf '  [FAIL] trace (HUD with token counter + ctx): %s\n' "$(cat "$TMP/err.trace")" >&2; FAIL=1
 fi
 if [[ "$out" != *$'\033['* ]]; then printf '  [PASS] trace (stdout without colour codes)\n'
-else printf '  [FAIL] trace (stdout with colour codes)\n' >&2; FAIL=1; fi
+else printf '  [FAIL] trace (stdout without colour codes)\n' >&2; FAIL=1; fi
 
 tf2="$TMP/quiet_mock.jsonl"
 cp "$tf" "$tf2"
@@ -916,7 +923,7 @@ out="$(printf '%s\n' "$long" | render_markdown_force)"
 contains "table (truncation with …)" "…" "$out"
 
 # Coloured signal lines
-out="$(printf '> **Warning:** care needed\n> normal quote\n❌ broken\nError: read failed\n✓ done\n- item\n---\n[Page](https://example.com/x) view' | render_markdown_force)"
+out="$(printf '> **NOTE:** care needed\n> normal quote\n❌ broken\nError: read failed\n✓ done\n- item\n---\n[Page](https://example.com/x) view' | render_markdown_force)"
 contains "colour (warning orange)" $'\033[33m> ' "$out"
 contains "colour (quote dim)" $'\033[2m> normal' "$out"
 contains "colour (separator dim)" $'\033[2m---' "$out"
@@ -944,20 +951,20 @@ out="$(_mcp_argv context7 2>/dev/null)"
 contains "mcp (argv context7)" "fake_mcp.sh" "$out"
 
 out="$(_mcp_call defuddle fetch '{"url":"https://x.test","max_length":750}' 2>&1)"
-assert "mcp (session + tools/call)" "Excerpt: https://x.test (max 750)" "$out"
+assert "mcp (session + tools/call)" "Auszug: https://x.test (max 750)" "$out"
 
 out="$(tool_web_fetch 'https://x.test' '' 2>&1)"
-assert "web_fetch (default max_length)" "Excerpt: https://x.test (max 8000)" "$out"
+assert "web_fetch (default max_length)" "Auszug: https://x.test (max 8000)" "$out"
 out="$(tool_web_fetch 'https://x.test' '500' 2>&1)"
-assert "web_fetch (max_length passed on)" "Excerpt: https://x.test (max 500)" "$out"
+assert "web_fetch (max_length passed on)" "Auszug: https://x.test (max 500)" "$out"
 out="$(dispatch_tool web_fetch "$(jq -cn --arg u 'https://y.test' '{url:$u}')" 2>&1)"
-assert "dispatch (web_fetch)" "Excerpt: https://y.test (max 8000)" "$out"
+assert "dispatch (web_fetch)" "Auszug: https://y.test (max 8000)" "$out"
 
 out="$(tool_context7 'curl retries' 2>&1)"
 contains "context7 (resolve)" "Library (context7): /fake/lib" "$out"
-contains "context7 (fetch docs)" "DOCUMENTATION: curl retries (source: /fake/lib)" "$out"
+contains "context7 (fetch docs)" "DOKUMENTATION: curl retries (Quelle: /fake/lib)" "$out"
 out="$(tool_context7 'curl retries' '/fake/lib' 2>&1)"
-contains "context7 (library set)" "DOCUMENTATION: curl retries (source: /fake/lib)" "$out"
+contains "context7 (library set)" "DOKUMENTATION: curl retries (Quelle: /fake/lib)" "$out"
 
 mrc=0; err="$(tool_context7 '' '' 2>&1 >/dev/null)" || mrc=$?
 assert "context7 (query required rc)" "1" "$mrc"
@@ -965,10 +972,10 @@ contains "context7 (query required message)" "query is missing" "$err"
 
 mrc=0; err="$(_mcp_call defuddle boom '{}' 2>&1 >/dev/null)" || mrc=$?
 assert "mcp (isError rc)" "1" "$mrc"
-contains "mcp (isError text for the model)" "intentionally broken" "$err"
+contains "mcp (isError text for the model)" "absichtlich kaputt" "$err"
 mrc=0; err="$(_mcp_call defuddle nosuch '{}' 2>&1 >/dev/null)" || mrc=$?
 assert "mcp (unknown tool rc)" "1" "$mrc"
-contains "mcp (JSON-RPC error)" "unknown tool" "$err"
+contains "mcp (JSON-RPC error)" "unbekanntes Tool" "$err"
 mrc=0; err="$(_mcp_call defuddle fetch 'broken' 2>&1 >/dev/null)" || mrc=$?
 assert "mcp (invalid JSON rc)" "1" "$mrc"
 contains "mcp (invalid JSON message)" "not valid JSON" "$err"
@@ -1004,21 +1011,21 @@ argv="$(_mcp_argv playwright)"
 contains "browser (argv from config)" "fake_mcp.sh" "$argv"
 
 out="$(tool_browser navigate 'https://demo.test' 2>&1)"
-contains "browser (navigate passed on)" "Navigated to: https://demo.test" "$out"
+contains "browser (navigate passed on)" "Gefahren nach: https://demo.test" "$out"
 out="$(tool_browser snapshot 2>&1)"
 contains "browser (snapshot with refs)" "ref=s1e44" "$out"
-out="$(tool_browser click '' 's1e44' 'Submit' 2>&1)"
-contains "browser (click ref+element)" 'Clicked: ref=s1e44 on "Submit"' "$out"
-out="$(tool_browser type '' 's1e46' '' 'hello' 2>&1)"
-contains "browser (type ref+text)" "Typed to ref=s1e46: hello" "$out"
+out="$(tool_browser click '' 's1e44' 'Absenden' 2>&1)"
+contains "browser (click ref+element)" 'Geklickt: ref=s1e44 auf "Absenden"' "$out"
+out="$(tool_browser type '' 's1e46' '' 'hallo' 2>&1)"
+contains "browser (type ref+text)" "Getippt nach ref=s1e46: hallo" "$out"
 out="$(tool_browser wait '' '' '' '2' 2>&1)"
-contains "browser (wait time passed on)" "Waited: 2s" "$out"
+contains "browser (wait time passed on)" "Gewartet: 2s" "$out"
 mrc=0; err="$(tool_browser wait '' '' '' 'bald' 2>&1 >/dev/null)" || mrc=$?
 assert "browser (wait without number rc)" "1" "$mrc"
 contains "browser (wait without number message)" "seconds" "$err"
 out="$(dispatch_tool browser "$(jq -cn '{action:"snapshot"}')" 2>&1)"
 contains "dispatch (browser snapshot)" "ref=s1e42" "$out"
-out="$(dispatch_tool browser "$(jq -cn '{action:"click",ref:"s1e44",element:"Submit"}')" 2>&1)"
+out="$(dispatch_tool browser "$(jq -cn '{action:"click",ref:"s1e44",element:"Absenden"}')" 2>&1)"
 contains "dispatch (browser click complete)" "ref=s1e44" "$out"
 
 mrc=0; err="$(tool_browser navigate '' 2>&1 >/dev/null)" || mrc=$?
@@ -1035,7 +1042,7 @@ assert "browser (unknown action rc)" "1" "$mrc"
 contains "browser (unknown action message)" "navigate|snapshot" "$err"
 mrc=0; err="$(tool_browser press '' '' '' '' 'Enter' 2>&1 >/dev/null)" || mrc=$?
 assert "browser (stub error path rc)" "1" "$mrc"
-contains "browser (stub error path text)" "unknown tool" "$err"
+contains "browser (stub error path text)" "unbekanntes Tool" "$err"
 mrc=0; out="$(dispatch_tool browser 'not-json' 2>&1)" || mrc=$?
 assert "browser (dispatch without JSON object rc)" "1" "$mrc"
 contains "browser (dispatch without JSON object message)" "not a JSON object" "$out"
@@ -1057,11 +1064,11 @@ out="$(tool_mcp defuddle '' 2>&1)"
 contains "mcp-gen (empty tool = discovery)" "query-docs" "$out"
 contains "mcp-gen (discovery header)" "Tools from defuddle" "$out"
 out="$(tool_mcp defuddle fetch "$(jq -cn '{url:"https://g.test",max_length:42}')" 2>&1)"
-contains "mcp-gen (tools/call forwarded)" "Excerpt: https://g.test (max 42)" "$out"
+contains "mcp-gen (tools/call forwarded)" "Auszug: https://g.test (max 42)" "$out"
 out="$(dispatch_tool mcp "$(jq -cn '{server:"defuddle",tool:"fetch",arguments:{url:"https://d.test"}}')" 2>&1)"
-contains "mcp-gen (dispatch object arguments)" "Excerpt: https://d.test" "$out"
+contains "mcp-gen (dispatch object arguments)" "Auszug: https://d.test" "$out"
 out="$(dispatch_tool mcp "$(jq -cn '{server:"defuddle",tool:"fetch",arguments:"{\"url\":\"https://s.test\"}"}')" 2>&1)"
-contains "mcp-gen (dispatch string arguments)" "Excerpt: https://s.test" "$out"
+contains "mcp-gen (dispatch string arguments)" "Auszug: https://s.test" "$out"
 out="$(dispatch_tool mcp "$(jq -cn '{server:"defuddle",tool:"__tools"}')" 2>&1)"
 contains "mcp-gen (dispatch discovery)" "resolve-library-id" "$out"
 mrc=0; err="$(tool_mcp '' '' 2>&1 >/dev/null)" || mrc=$?
@@ -1359,6 +1366,66 @@ assert "prompt (colourless without TTY)" "lex> " "$out"
 # Step 14: hierarchy light/dark safe (no "white", no italic)
 out="$(printf '### Third\n' | render_markdown_force)"
 contains "step14 (H3 cyan instead of bold)" $'\033[36m### Third' "$out"
+
+# ---------------------------------------------------------------------------
+# /lexpen — prompt mode (plan 2026-10-03, user go)
+# IMPORTANT: cmd_lexpen changes _system_prompt/_messages — NEVER call it inside
+# $() (a subshell loses the state), but directly with a redirect into a file.
+# ---------------------------------------------------------------------------
+setup_messages
+sysc="$(jq -r '.[0].content' <<< "$_messages")"
+contains "lexpen (start: default prompt)" "You are Lex" "$sysc"
+assert "lexpen (flag initially off)" "" "${_lexpen_active:-}"
+
+cmd_lexpen on > "$TMP/lexpen.out" 2>&1
+assert "lexpen (on: rc)" "0" "$?"
+out="$(cat "$TMP/lexpen.out")"
+assert "lexpen (file created)" "1" \
+  "$([[ -s "$LEX_HOME/prompts/lexpen.md" ]] && echo 1 || echo 0)"
+sysc="$(jq -r '.[0].content' <<< "$_messages")"
+contains "lexpen (persona in context)" "senior software engineer" "$sysc"
+contains "lexpen (attribution @Lex)" "made by @Lex" "$sysc"
+assert "lexpen (no XP4 in the context)" "0" \
+  "$([[ "$sysc" == *XP4* ]] && echo 1 || echo 0)"
+assert "lexpen (flag set)" "1" "${_lexpen_active:-}"
+contains "lexpen (status message)" "Lex persona" "$out"
+
+cmd_lexpen on > "$TMP/lexpen.out" 2>&1
+contains "lexpen (2nd call: hint instead of error)" "already active" \
+  "$(cat "$TMP/lexpen.out")"
+
+# Prompt marker: lex*> while the mode is active (fresh subshell source)
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+  source "$2" "" </dev/null >/dev/null 2>&1; _lexpen_active=1; _prompt' _ "$TMP" "$LEX_BIN" 2>&1)"
+assert "lexpen (prompt marker lex*>)" "lex*> " "$out"
+
+cmd_lexpen off > "$TMP/lexpen.out" 2>&1
+assert "lex (off: rc)" "0" "$?"
+out="$(cat "$TMP/lexpen.out")"
+sysc="$(jq -r '.[0].content' <<< "$_messages")"
+contains "lex (back: original prompt)" "You are Lex" "$sysc"
+assert "lex (flag reset)" "" "${_lexpen_active:-}"
+contains "lex (message)" "original" "$out"
+cmd_lexpen off > "$TMP/lexpen.out" 2>&1
+contains "lex (2nd off: hint)" "already active" "$(cat "$TMP/lexpen.out")"
+
+# D6: placeholders from the file are expanded, the file itself stays literal
+printf '\nWiki: ${_wiki_dir} / ${_htools_dir}\n' >> "$LEX_HOME/prompts/lexpen.md"
+cmd_lexpen on >/dev/null 2>&1
+sysc="$(jq -r '.[0].content' <<< "$_messages")"
+contains "lexpen (${_wiki_dir} expanded)" "$LEX_HOME/wiki" "$sysc"
+assert "lexpen (no literal \${_wiki_dir} in the context)" "0" \
+  "$([[ "$sysc" == *'${_wiki_dir}'* ]] && echo 1 || echo 0)"
+assert "lexpen (file keeps the literal)" "1" \
+  "$(grep -qF '${_wiki_dir}' "$LEX_HOME/prompts/lexpen.md" && echo 1 || echo 0)"
+cmd_lexpen off >/dev/null 2>&1
+
+# /help and /status know the mode
+out="$(usage)"
+contains "usage (mentions /lexpen)" "/lexpen" "$out"
+contains "usage (mentions /lex)" "/lex " "$out"
+out="$(cmd_status)"
+contains "status (prompt line standard)" "prompt    : standard" "$out"
 
 if (( FAIL > 0 )); then
   echo "FAILED: $FAIL test(s) in test_features.sh" >&2

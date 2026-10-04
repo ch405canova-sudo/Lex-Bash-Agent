@@ -5,7 +5,7 @@
 # Pure Bash + jq + curl. No Node, no Python.
 #
 # Modes:
-#   lex                    -> interactive REPL
+#   lex                    -> Interactive REPL
 #   lex --oneshot          -> single shot (stdin -> stdout, exit)
 #   lex --install          -> create ~/.lex/ + settings.json + symlink
 #   lex --version          -> version
@@ -17,6 +17,7 @@
 #      LEX_REASONING_BUDGET, LEX_TEMPERATURE, LEX_MAX_TURNS,
 #      LEX_MAX_NUDGES, LEX_API_TIMEOUT, LEX_TOOL_TIMEOUT,
 #      LEX_TOOL_MAX_OUTPUT, LEX_LOG_DIR,
+#      LEX_CTX_LIMIT, LEX_COMPACT, LEX_COMPACT_KEEP, LEX_COMPACT_BUFFER,
 #      LEX_MOCK, LEX_MOCK_FILE
 #
 set -u
@@ -41,7 +42,7 @@ _mem_dir="${LEX_MEM_DIR:-$_lex_home/mem}"
 # Root of the LLM wiki (Karpathy layout raw/ + wiki/), see the docs.
 _wiki_dir="${LEX_WIKI_DIR:-${_lex_home}/wiki}"
 # Tool/software directory (step 18): downloads, extraction and execution all
-# happen here — override with LEX_HTOOLS_DIR.
+# happen here — hard-coded default ${HOME}/H-Tools.
 _htools_dir="${LEX_HTOOLS_DIR:-${HOME}/H-Tools}"
 
 # Absolute path without GNU tools (fallback chain used by safe_path).
@@ -75,8 +76,7 @@ _run_limited() {
 }
 
 # LEX_MOCK_FILE: shadow copy so the source file is not destroyed (bug #10).
-# Sequence is preserved across runs (shadow is only refreshed when the source
-# is newer).
+# Sequence is preserved across runs (shadow only refreshed when the source is newer).
 _mock_shadow() {
   local src="$1" key dir shadow
   [[ -f "$src" ]] || { printf '%s\n' "$src"; return 0; }
@@ -98,9 +98,7 @@ _mock_shadow() {
 
 # Defaults (tier 1)
 _default_api_url="http://127.0.0.1:8080/v1/chat/completions"
-# No baked-in model path: set LEX_MODEL or "model" in settings.json.
-# Recommended model: Ternary-Bonsai-2-27B-PQ2_0.gguf (see README).
-_default_model=""
+_default_model="${_ai_dir}/model/Ternary-Bonsai-2-27B-PQ2_0.gguf"
 _default_max_tokens=16384
 # Budget = server flag from ai.sh; the request field wins. 2026-09-29 (live
 # review, "large tasks"): 8192/4096 cut visible answers at ~4096 tokens and
@@ -115,6 +113,14 @@ _default_tool_max_output=50000
 # LEX_MAX_NUDGES.
 _default_max_nudges=4
 _default_log_dir="${_lex_home}/log"
+# Context & compaction (step 42, 2026-10-02): _ctx_limit must match the
+# server flag -c (/server confirms n_ctx). Compaction runs INERT: only above
+# the threshold ctx - max(max_tokens, buffer) does it act — the tests below
+# keep running unchanged (modelled on opencode).
+_default_ctx_limit=262144
+_default_compact="on"
+_default_compact_keep=15000
+_default_compact_buffer=20000
 
 # Loaded config (tier 2-4)
 _api_url=""
@@ -128,6 +134,10 @@ _tool_timeout=""
 _tool_max_output=""
 _max_nudges=""
 _log_dir=""
+_ctx_limit=""
+_compact=""
+_compact_keep=""
+_compact_buffer=""
 _mock="${LEX_MOCK:-}"
 _mock_file=""
 if [[ -n "${LEX_MOCK_FILE:-}" ]]; then
@@ -136,6 +146,7 @@ fi
 _approve="${LEX_APPROVE:-0}"
 _sudo="${LEX_SUDO:-1}"
 _sudo_approve="${LEX_SUDO_APPROVE:-1}"
+_autosudo="${LEX_AUTOSUDO:-0}"
 _session_enabled="${LEX_SESSION:-1}"
 _session_id=""
 _session_file=""
@@ -145,6 +156,8 @@ _messages='[]'
 _turn_count=0
 _last_prompt_tokens=""
 _last_completion_tokens=""
+_compact_count=0
+_compact_last=""
 
 # ---------------------------------------------------------------------------
 # Config (4 tiers)
@@ -163,6 +176,10 @@ _load_settings() {
   v="$(jq -r '.tool_timeout // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _tool_timeout="$v"
   v="$(jq -r '.tool_max_output // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _tool_max_output="$v"
   v="$(jq -r '.log_dir // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _log_dir="$v"
+  v="$(jq -r '.ctx_limit // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _ctx_limit="$v"
+  v="$(jq -r '.compact // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact="$v"
+  v="$(jq -r '.compact_keep // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_keep="$v"
+  v="$(jq -r '.compact_buffer // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_buffer="$v"
 }
 
 # Config values come from user input (P2, 2026-09-28): without this check a
@@ -204,6 +221,10 @@ load_config() {
   _tool_max_output="$_default_tool_max_output"
   _max_nudges="$_default_max_nudges"
   _log_dir="$_default_log_dir"
+  _ctx_limit="$_default_ctx_limit"
+  _compact="$_default_compact"
+  _compact_keep="$_default_compact_keep"
+  _compact_buffer="$_default_compact_buffer"
   # tier 2: ~/.lex/settings.json
   _load_settings "${_lex_home}/settings.json"
   # tier 3: .lex/settings.json (cwd)
@@ -220,9 +241,14 @@ load_config() {
   _tool_max_output="${LEX_TOOL_MAX_OUTPUT:-$_tool_max_output}"
   _max_nudges="${LEX_MAX_NUDGES:-$_max_nudges}"
   _log_dir="${LEX_LOG_DIR:-$_log_dir}"
+  _ctx_limit="${LEX_CTX_LIMIT:-$_ctx_limit}"
+  _compact="${LEX_COMPACT:-$_compact}"
+  _compact_keep="${LEX_COMPACT_KEEP:-$_compact_keep}"
+  _compact_buffer="${LEX_COMPACT_BUFFER:-$_compact_buffer}"
   _approve="${LEX_APPROVE:-$_approve}"
   _sudo="${LEX_SUDO:-$_sudo}"
   _sudo_approve="${LEX_SUDO_APPROVE:-$_sudo_approve}"
+  _autosudo="${LEX_AUTOSUDO:-$_autosudo}"
   _session_enabled="${LEX_SESSION:-$_session_enabled}"
   _mem_dir="${LEX_MEM_DIR:-$_mem_dir}"
   _wiki_dir="${LEX_WIKI_DIR:-$_wiki_dir}"
@@ -235,9 +261,16 @@ load_config() {
   _tool_max_output="$(_int_or "$_tool_max_output" "$_default_tool_max_output")"
   _max_nudges="$(_int_or "$_max_nudges" "$_default_max_nudges")"
   _temperature="$(_float_or "$_temperature" "$_default_temperature")"
-  # mock mode needs no model (canned answers, nothing is sent)
-  if [[ -z "${_model:-}" && "${_need_model:-1}" = 1 && -z "${_mock:-}" && -z "${_mock_file:-}" ]]; then
-    echo "Error: no LLM model configured (set LEX_MODEL or \"model\" in ~/.lex/settings.json — see README)." >&2
+  _ctx_limit="$(_int_or "$_ctx_limit" "$_default_ctx_limit")"
+  _compact_keep="$(_int_or "$_compact_keep" "$_default_compact_keep")"
+  _compact_buffer="$(_int_or "$_compact_buffer" "$_default_compact_buffer")"
+  case "$_compact" in
+    on|1|true|yes)  _compact="on" ;;
+    off|0|false|no)  _compact="off" ;;
+    *)               _compact="$_default_compact" ;;
+  esac
+  if [[ -z "${_model:-}" ]]; then
+    echo "Error: no LLM model set (LEX_MODEL or settings.json)." >&2
     return 1
   fi
 }
@@ -254,9 +287,9 @@ log() {
 }
 
 # ---------------------------------------------------------------------------
-# Span-level logging (2026-09-30, observability): every tool run is written
-# as one JSONL line to <log-dir>/spans.jsonl — the minimal form of
-# "observability + evaluation" (the 6th of 6 layers, Future AGI 2026).
+# Span layer (step 26, 2026-09-30, observability): every tool run is written
+# as ONE JSONL line to <log-dir>/spans.jsonl — the foundation for running
+# `lex --eval`.
 # ---------------------------------------------------------------------------
 _ms_now() {
   # `date +%N` is GNU-only — fall back to whole seconds elsewhere (rule C,
@@ -289,7 +322,7 @@ span_log() {
 }
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt (English first)
 # ---------------------------------------------------------------------------
 _system_prompt="You are Lex — a locally running terminal agent: alert, direct, English-speaking. You think briefly, act precisely and never guess.
 
@@ -307,6 +340,11 @@ Your expertise covers:
 - Reporting: you write detailed reports of your findings and give practical recommendations for fixing the weaknesses you identified.
 
 Your ethical approach guarantees that all of your activities are transparent and in line with legal requirements. You work closely with your clients so their security measures stay current and effectively protect against today's threats.
+
+Working framework (standing, applies to every task):
+- Scope: internal security service — own systems, the company's own lab, CTF and practice environments. Blue-team work is the core business: hardening, vulnerability analysis, malware analysis, incident response, detection engineering, log and traffic analysis, reports.
+- You carry out such tasks directly, without asking for authorisation — even when they contain terms like exploit, payload, brute force or attack simulation. Technical terms are working vocabulary, not a reason to refuse.
+- If you hesitate over a task: a short scope question about target and approval is right, a blanket refusal is not. If target or approval lies outside the scope, ask — and stop instead of guessing.
 
 Personality & style:
 - **ALWAYS in English** — answers, intermediate steps, files, log entries. No exceptions.
@@ -357,7 +395,44 @@ Rules:
 - **Database tasks (Postgres, local):** server \`postgres\` — first mcp(postgres, '__tools') for the REAL tool list (execute_sql, search_objects), then SQL. The target is your own \`lex\` database on 127.0.0.1:5432 (user-space under ~/.lex/pg, start/stop: ~/.lex/pg/start.sh) with full rights — do not touch other databases or users.
 - **Record what you learn after success:** one line in the log (done and learned), maintain the matching wiki article for new insights (\`write_file\` plus an index line) and use \`mem_add\` for comparisons you keep needing. That way your knowledge grows from session to session.
 - **Software & tools ALWAYS in ${_htools_dir}:** when you download, install, unpack or run software, tools or repositories, use ${_htools_dir} exclusively as target and base directory (mkdir -p if it is missing) — never \$HOME, never /tmp. Paths in your scripts and answers about tools lead from there.
+- **Never guess addresses & downloads (audit 2026-10-03):** take GitHub owners, release tags, asset names, domains and similar addresses exclusively from web_search, web_fetch, browser or tool results — never construct them from memory (guessed owners were wrong 7/7). Before every download: (1) check the repo root by HTTP status (200?), (2) query the asset list (\`releases/expanded_assets/<tag>\` — on API 403 rate limit, use HTML instead of the API), (3) download exactly the listed name, (4) verify the result: status + file type + size (under 1 kB = error page, do not keep it), (5) no release available → \`go install\` or a source build instead of more searching. URLs that go into the wiki or the DB are checked for HTTP 200 beforehand.
 - Avoid endless loops: once you have completed the task, answer with text (no tool call)."
+
+# ---------------------------------------------------------------------------
+# /autosudo (audit finding §7.1, 2026-10-03): answer the y/N approval in the
+# sudo gate automatically — otherwise the run blocks per sudo command (two
+# hangs of 24/13 min in the step-45 run). Only the approval is automated;
+# password/TTY questions in _sudo_ask stay manual.
+#   /autosudo on|off   or LEX_AUTOSUDO=1 at startup; bare = status
+# ---------------------------------------------------------------------------
+cmd_autosudo() {
+  local what="${1:-status}"
+  case "$what" in
+    on|an|1)
+      _autosudo=1
+      echo "✓ /autosudo on — y/N approvals in the sudo gate run automatically (password/TTY questions in _sudo_ask remain manual)."
+      log "cmd: /autosudo on"
+      ;;
+    off|aus|0)
+      _autosudo=0
+      echo "✓ /autosudo off — sudo approvals ask y/N on the TTY again."
+      log "cmd: /autosudo off"
+      ;;
+    *)
+      if [[ "${_autosudo:-0}" == "1" ]]; then
+        echo "  /autosudo: active (y/N approvals automatic)"
+      else
+        echo "  /autosudo: inactive (y/N approval on the TTY)"
+      fi
+      ;;
+  esac
+}
+
+# /lexpen (plan 2026-10-03, user GO): keep the original prompt + mode flag.
+# The default is already expanded here with double quotes —
+# a later restore is byte-identical to the initial state.
+_system_prompt_default="$_system_prompt"
+_lexpen_active=""
 
 # ---------------------------------------------------------------------------
 # Session JSONL (spec §6.5): append-only, one message per line
@@ -389,54 +464,94 @@ session_write() {
 # ---------------------------------------------------------------------------
 append_message_json() {
   local msg="$1" reasoning="${2:-}"
-  local new
-  new="$(jq -c --argjson m "$msg" '. + [$m]' <<< "$_messages")" || {
+  # Everything via files (2026-09-30): `--arg`/`--argjson` as a shell argument
+  # ends at MAX_ARG_STRLEN (128 KB) — the message would have been lost
+  # (with heavy escaping even earlier). Instead --slurpfile/--rawfile.
+  local mtf new rc
+  mtf="$(mktemp)" || { log "append_message_json: cannot create temp file"; return 1; }
+  if ! printf '%s' "$msg" > "$mtf" 2>/dev/null; then
+    rm -f "$mtf"; log "append_message_json: cannot write temp file"; return 1
+  fi
+  new="$(jq -c --slurpfile m "$mtf" '. + [$m[0]]' <<< "$_messages")"
+  rc=$?
+  rm -f "$mtf"
+  if (( rc != 0 )) || [[ -z "$new" ]]; then
     log "append_message_json: invalid msg (${#msg} chars) — context kept"
     return 1
-  }
+  fi
   _messages="$new"
   [[ -n "${_session_file:-}" ]] || return 0
-  local ts rec
+  local ts rec rtf rf
   ts="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  rtf="$(mktemp)" || return 1
+  if ! printf '%s' "$msg" > "$rtf" 2>/dev/null; then rm -f "$rtf"; return 1; fi
   if [[ -n "$reasoning" ]]; then
-    rec="$(jq -c -n --arg ts "$ts" --argjson m "$msg" --arg r "$reasoning" \
-      '{type:"message",ts:$ts,message:$m,reasoning:$r}')" || return 1
+    rf="$(mktemp)" || { rm -f "$rtf"; return 1; }
+    if ! printf '%s' "$reasoning" > "$rf" 2>/dev/null; then rm -f "$rtf" "$rf"; return 1; fi
+    rec="$(jq -c -n --arg ts "$ts" --slurpfile m "$rtf" --rawfile r "$rf" \
+      '{type:"message",ts:$ts,message:$m[0],reasoning:$r}')"
+    rm -f "$rf"
   else
-    rec="$(jq -c -n --arg ts "$ts" --argjson m "$msg" '{type:"message",ts:$ts,message:$m}')" || return 1
+    rec="$(jq -c -n --arg ts "$ts" --slurpfile m "$rtf" \
+      '{type:"message",ts:$ts,message:$m[0]}')"
   fi
+  rm -f "$rtf"
+  [[ -n "$rec" ]] || return 1
   session_write "$rec"
 }
 
 append_message() {
   local role="$1" content="$2"
-  # E2BIG guard (step 17b): Linux caps shell arguments at 128 KB — larger
-  # payloads made `jq --arg` fail, msg came out empty and the following
-  # --argjson call wiped the whole context.
-  if (( ${#content} > 100000 )); then
-    content="${content:0:100000}"$'\n... (truncated, '"${#content}"' bytes total)'
+  # No E2BIG and no truncation (2026-09-30): content runs through a file
+  # into jq (--rawfile) instead of a shell argument. The old 100 000-byte cap
+  # cut off what the model received; the E2BIG case no longer exists this way.
+  local tf msg rc
+  tf="$(mktemp)" || { log "append_message: cannot create temp file"; return 1; }
+  if ! printf '%s' "$content" > "$tf" 2>/dev/null; then
+    rm -f "$tf"; log "append_message: cannot write temp file"; return 1
   fi
-  local msg
-  msg="$(jq -n --arg role "$role" --arg content "$content" '{role:$role,content:$content}')" || {
+  msg="$(jq -n --arg role "$role" --rawfile c "$tf" '{role:$role,content:$c}')"
+  rc=$?
+  rm -f "$tf"
+  if (( rc != 0 )) || [[ -z "$msg" ]]; then
     log "append_message: jq error for $role (${#content} chars) — not appended"
     return 1
-  }
+  fi
   append_message_json "$msg"
 }
 
 append_tool_message() {
   local tci="$1" content="$2"
-  # E2BIG guard like append_message: without a cap jq --arg failed silently,
-  # the tool message went missing and the tool_call stayed unanswered (protocol
-  # break) — now truncated, with a byte-count placeholder as a last resort.
-  if (( ${#content} > 100000 )); then
-    content="${content:0:100000}"$'\n... (truncated, '"${#content}"' bytes total)'
+  # Same path as append_message (file instead of argument): the full
+  # tool result reaches the model without jq failing at 128 KB.
+  local tf msg rc
+  tf="$(mktemp)" || { log "append_tool_message: cannot create temp file"; return 1; }
+  if ! printf '%s' "$content" > "$tf" 2>/dev/null; then
+    rm -f "$tf"; log "append_tool_message: cannot write temp file"; return 1
   fi
-  local msg
-  msg="$(jq -n --arg tci "$tci" --arg content "$content" '{role:"tool",tool_call_id:$tci,content:$content}')" || {
-    log "append_tool_message: jq error (${#content} chars) — placeholder"
+  msg="$(jq -n --arg tci "$tci" --rawfile c "$tf" '{role:"tool",tool_call_id:$tci,content:$c}')"
+  rc=$?
+  rm -f "$tf"
+  if (( rc != 0 )) || [[ -z "$msg" ]]; then
+    log "append_tool_message: jq error (${#content} chars)"
     msg="$(jq -n --arg tci "$tci" --arg content "(tool result could not be embedded: ${#content} bytes)" '{role:"tool",tool_call_id:$tci,content:$content}')" || return 1
-  }
+  fi
   append_message_json "$msg"
+}
+
+# Wiki state (index + latest log lines) — shared by
+# setup_messages AND cmd_lexpen: the mode switch keeps the wiki state.
+_wiki_ex() {
+  local mem_ex=""
+  if [[ -f "$_wiki_dir/wiki/index.md" ]]; then
+    mem_ex+=$'\n\n# — Wiki state (automatic: '"$_wiki_dir"') —\n'
+    mem_ex+="$(cat "$_wiki_dir/wiki/index.md" 2>/dev/null)"
+  fi
+  if [[ -f "$_wiki_dir/wiki/log.md" ]]; then
+    mem_ex+=$'\n\n## latest entries from wiki/log.md\n'
+    mem_ex+="$(tail -n 40 "$_wiki_dir/wiki/log.md" 2>/dev/null)"
+  fi
+  printf '%s' "$mem_ex"
 }
 
 setup_messages() {
@@ -444,31 +559,31 @@ setup_messages() {
   # O2 (step 17, 2026-09-29): wiki state always in context — index.md and
   # the newest log lines hang off the system prompt so that learning from the
   # Karpathy wiki does not depend on the model's random tool calls.
-  local mem_ex=""
-  if [[ -f "$_wiki_dir/wiki/index.md" ]]; then
-    mem_ex+=$'\n\n# — Wiki state (automatic: '"$_wiki_dir"') —\n'
-    mem_ex+="$(cat "$_wiki_dir/wiki/index.md" 2>/dev/null)"
-  fi
-  if [[ -f "$_wiki_dir/wiki/log.md" ]]; then
-    mem_ex+=$'\n\n## recent entries from wiki/log.md\n'
-    mem_ex+="$(tail -n 40 "$_wiki_dir/wiki/log.md" 2>/dev/null)"
-  fi
-  # Guard (review 2026-09-29): --arg is limited to 128 KB per argument;
-  # an oversized wiki block would have emptied _messages -> startup abort.
-  local sys="${_system_prompt}${mem_ex}"
-  if (( ${#sys} > 100000 )); then
-    sys="${sys:0:100000}"$'\n... (wiki state truncated, '"${#sys}"' bytes total)'
-  fi
-  _messages="$(jq -c -n --arg content "$sys" '[{role:"system",content:$content}]')" || {
+  # System prompt + wiki also via a file: no 128-KB argument,
+  # no truncation (before 100 000 bytes → wiki state was cut off).
+  local sys stf rc
+  sys="${_system_prompt}$(_wiki_ex)"
+  stf="$(mktemp)" || { log "setup_messages: cannot create temp file"; return 1; }
+  if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then rm -f "$stf"; return 1; fi
+  _messages="$(jq -c -n --rawfile c "$stf" '[{role:"system",content:$c}]')"
+  rc=$?
+  rm -f "$stf"
+  if (( rc != 0 )) || [[ -z "$_messages" ]]; then
     log "setup_messages: jq error (${#sys} chars) — system prompt without wiki"
-    _messages="$(jq -c -n --arg content "$_system_prompt" '[{role:"system",content:$content}]')" || _messages='[]'
-  }
+    stf="$(mktemp)" || { _messages='[]'; return 0; }
+    printf '%s' "$_system_prompt" > "$stf" 2>/dev/null || { rm -f "$stf"; _messages='[]'; return 0; }
+    _messages="$(jq -c -n --rawfile c "$stf" '[{role:"system",content:$c}]')" || _messages='[]'
+    rm -f "$stf"
+  fi
 }
 
 # ---------------------------------------------------------------------------
 # API call (OpenAI protocol, local LLM)
 # ---------------------------------------------------------------------------
 _build_tools() {
+  # Compaction (step 42): the summary request runs WITHOUT tools —
+  # saves the 17 schemas in the body and prevents tool answers.
+  [[ -n "${_tools_off:-}" ]] && { printf '[]'; return 0; }
   jq -n '[
     {type:"function",function:{name:"read_file",description:"Reads a file and returns its contents.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"}},required:["path"]}}},
     {type:"function",function:{name:"write_file",description:"Writes a file (overwrites an existing one).",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"},content:{type:"string",description:"File contents"}},required:["path","content"]}}},
@@ -490,37 +605,92 @@ _build_tools() {
   ]'
 }
 
+# ---------------------------------------------------------------------------
+# SSE or JSON response of the server → OpenAI-compatible single response.
+# Exactly ONE jq run over the finished file: the earlier version did ~4
+# jq forks per SSE line (3000 chunks ≈ 29 s) and merged the
+# tool_calls incorrectly (`jq -s '.[0] + .[1]'` with two here-strings only read
+# the last delta → name=None, arguments a fragment like "}").
+# ---------------------------------------------------------------------------
+_sse_to_response() {
+  local f="$1"
+  # Servers that ignore stream:true answer directly with JSON.
+  if [[ "$(head -c 1 "$f" 2>/dev/null)" == "{" ]]; then
+    jq -c 'if (.choices | type) == "array" then . else error("no choices array") end' "$f"
+    return $?
+  fi
+  jq -Rn '
+    [inputs] as $raw
+    | [$raw[] | select(startswith("data:")) | sub("^data:[ ]?"; "")] as $evs
+    | ([$evs[] | select(. == "[DONE]")] | length > 0) as $done
+    | [$evs[] | select(. != "" and . != "[DONE]")
+        | (try fromjson catch empty) | select(type == "object")] as $e
+    | if ($e | length) == 0 then error("no data: events in the stream")
+    else
+      reduce $e[] as $c
+        ({content:"", reasoning:"", usage:null, finish:null, err:null, tcs:{}};
+         ($c.choices[0] // {}) as $ch
+         | .content   += ($ch.delta.content // "")
+         | .reasoning += ($ch.delta.reasoning_content // "")
+         | .usage = ($c.usage // .usage)
+         | .err   = ($c.error.message // .err)
+         | if (($ch.finish_reason // null) != null) then .finish = $ch.finish_reason else . end
+         | if (($ch.delta.tool_calls // null) != null) then
+             reduce ($ch.delta.tool_calls[]) as $d (.;
+               ((.tcs[($d.index // 0 | tostring)] // {function:{}})) as $o
+               | .tcs[($d.index // 0 | tostring)] = ($o
+                   | if ($d.id // null) != null then .id = $d.id else . end
+                   | if ($d.type // null) != null then .type = $d.type else . end
+                   | .function.name = ($d.function.name // .function.name // "")
+                   | .function.arguments = ((.function.arguments // "") + ($d.function.arguments // ""))))
+           else . end)
+      end
+    | if .err != null then error(.err) else . end
+    | .tool_calls = [.tcs | to_entries | sort_by(.key | tonumber)
+        | .[] | {index:(.key | tonumber), id:(.value.id // ""), type:(.value.type // "function"),
+                 function:{name:(.value.function.name // ""),
+                           arguments:(.value.function.arguments // "")}}]
+    | {choices:[{index:0, message:{role:"assistant", content:.content,
+                 reasoning_content:.reasoning, tool_calls:.tool_calls},
+                 finish_reason:(.finish // "")}],
+       usage:.usage,
+       _lex_stream_ok:$done}
+    ' "$f"
+}
+
 call_api() {
-  # Nudge override (P2, live test 2026-09-29): single-use — set to 0 on the
-  # truncation/empty nudge so visible text is guaranteed to come through
-  # instead of reasoning eating all tokens again.
-  local _rb="${_rb_override:-$_reasoning_budget}"
+  local _rb="${_rb_override:-${_reasoning_budget:-10}}"
   _rb_override=""
+
   # Mock: file-based sequence (for tests)
   if [[ -n "${_mock_file:-}" && -f "${_mock_file}" ]]; then
     local line
     line="$(head -n1 "${_mock_file}" 2>/dev/null)"
     tail -n +2 "${_mock_file}" > "${_mock_file}.tmp" 2>/dev/null && mv "${_mock_file}.tmp" "${_mock_file}"
     if [[ -z "${line:-}" ]]; then
-      echo '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]}}],"usage":{"total_tokens":10}}'
+      echo '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
       return 0
     fi
     printf '%s\n' "$line"
     return 0
   fi
+
   # Mock: static
   if [[ "${_mock:-}" == "done" ]]; then
-    echo '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]}}],"usage":{"total_tokens":10}}'
+    echo '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
     return 0
   fi
-  # Real server
-  local tools_json mtf body_tf rc
+  # Real server — stream OR classic JSON response.
+  # Bugfix set 2026-09-30: curl rc and HTTP code are really measured
+  # (before, `rc=$?` after `done < <(curl …)` was the status of the
+  # loop body → server gone / HTTP errors slid silently into the
+  # "answer was empty" nudge chain), the evaluation runs in ONE jq.
+  local tools_json mtf body_tf url stream_tf err_tf jq_err rc http_code resp
   tools_json="$(_build_tools)"
-  # Context via file (not --argjson): _messages grows monotonically; from
-  # ~128 KiB onwards even jq becomes an exec argument (E2BIG) -> empty body -> API error.
-  # --slurpfile reads the history without an argv limit (review finding 2026-09-29).
   mtf="$(mktemp)" || { echo "Error: cannot create temp file."; return 1; }
-  printf '%s' "$_messages" >"$mtf" || { rm -f "$mtf"; return 1; }
+  # _msg_override (step 42): compaction sends the summary prompt without
+  # touching the canonical context — without the override it stays $_messages.
+  printf '%s' "${_msg_override:-${_messages:-}}" >"$mtf" || { rm -f "$mtf"; return 1; }
   body_tf="$(mktemp)" || { rm -f "$mtf"; echo "Error: cannot create temp file."; return 1; }
   jq -n \
     --slurpfile m "$mtf" \
@@ -529,7 +699,7 @@ call_api() {
     --argjson max_tokens "$_max_tokens" \
     --argjson rb "$_rb" \
     --argjson temp "$_temperature" \
-    '{model:$model,messages:$m[0],tools:$t,max_tokens:$max_tokens,reasoning_budget_tokens:$rb,temperature:$temp}' >"$body_tf"
+    '{model:$model,messages:$m[0],tools:$t,max_tokens:$max_tokens,reasoning_budget_tokens:$rb,temperature:$temp,stream:true,stream_options:{include_usage:true}}' >"$body_tf"
   rc=$?
   rm -f "$mtf"
   if (( rc != 0 )); then
@@ -537,25 +707,59 @@ call_api() {
     echo "Error: could not build the request body (jq)." >&2
     return 1
   fi
-  # ENV is evaluated at runtime so tests/REPL can still change the URL
-  # after load_config() ran (docs: "ENV overrides everything").
-  # body via file: from ~128 KiB an exec argument is too long (E2BIG —
-  # multi-turn runs push the history past the kernel limit, live finding
-  # 2026-09-29). curl reads @file without an argv limit; the timeout is now
-  # controllable because higher max_tokens means longer generations.
-  local url="${LEX_API_URL:-${_api_url:-$_default_api_url}}"
-  curl -sf --max-time "${LEX_API_TIMEOUT:-1800}" "$url" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${_api_key:-}" \
-    -d @"$body_tf"
+
+  url="${LEX_API_URL:-${_api_url:-$_default_api_url}}"
+  stream_tf="$(mktemp)" || { rm -f "$body_tf"; echo "Error: cannot create temp file."; return 1; }
+  err_tf="$(mktemp)"    || { rm -f "$body_tf" "$stream_tf"; echo "Error: cannot create temp file."; return 1; }
+
+  # -o writes the body away, -w delivers the HTTP status on STDOUT: both
+  # stay measurable without the stream being read through a loop.
+  http_code="$(curl -sS --max-time "${LEX_API_TIMEOUT:-1800}" \
+      -o "$stream_tf" -w '%{http_code}' \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${_api_key:-}" \
+      -H "Accept: text/event-stream" \
+      -d @"$body_tf" "$url" 2>"$err_tf")"
   rc=$?
   rm -f "$body_tf"
-  return "$rc"
-}
+  if (( rc != 0 )); then
+    local detail
+    detail="$(tr -d '\r' <"$err_tf" | grep -v '^$' | tail -n1)"
+    echo "Error: request failed (curl rc=$rc${detail:+ — $detail})." >&2
+    log "call_api: curl rc=$rc url=$url"
+    rm -f "$stream_tf" "$err_tf"
+    return 1
+  fi
+  if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    local snippet
+    snippet="$(head -c 200 "$stream_tf" | tr -d '\r\n')"
+    echo "Error: HTTP $http_code from the server${snippet:+ — $snippet}" >&2
+    log "call_api: HTTP $http_code"
+    rm -f "$stream_tf" "$err_tf"
+    return 1
+  fi
+  rm -f "$err_tf"
 
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
+  jq_err="$(mktemp)" || { rm -f "$stream_tf"; echo "Error: cannot create temp file."; return 1; }
+  resp="$(_sse_to_response "$stream_tf" 2>"$jq_err")"
+  rc=$?
+  rm -f "$stream_tf"
+  if (( rc != 0 )) || [[ -z "$resp" ]]; then
+    echo "Error: server response could not be evaluated ($(tr -d '\r\n' <"$jq_err" | head -c 200))." >&2
+    log "call_api: jq rc=$rc http=$http_code"
+    rm -f "$jq_err"
+    return 1
+  fi
+  rm -f "$jq_err"
+  # Without [DONE] the stream was torn off — say so explicitly instead of
+  # waving the partial text through as a complete answer (finding 2026-09-30).
+  if [[ "$(jq -r '._lex_stream_ok' <<<"$resp" 2>/dev/null)" == "false" ]]; then
+    echo "⚠️  Stream ended without [DONE] (${#resp} bytes read) — answer may be incomplete." >&2
+    log "call_api: stream ended without [DONE] http=$http_code bytes=${#resp}"
+  fi
+  printf '%s\n' "$resp"
+  return 0
+}
 safe_path() {
   local p="$1"
   local resolved real
@@ -593,17 +797,12 @@ tool_read_file() {
     echo "Error: file '$resolved' not found."
     return 1
   fi
-  # Cap like tool_bash/tool_search (step 17b): Linux limits arguments
-  # to 128 KB (MAX_ARG_STRLEN) — a 135 KB file made jq fail with E2BIG
-  # and afterwards emptied the whole context.
-  local content max_len="${_tool_max_output:-50000}" len
-  content="$(cat "$resolved")"
-  len=${#content}
-  if (( len > max_len )); then
-    content="${content:0:max_len}"
-    content+=$'\n... (truncated, '"${len}"' bytes total)'
-  fi
-  printf '%s\n' "$content"
+  # Full file (2026-09-30): the local 50 000-byte cap duplicated the central
+  # handling in run_turn and withheld content from the model.
+  # The E2BIG case it was built for no longer exists on the message path
+  # (jq runs over files) — oversized results get header + storage path there
+  # instead of an excerpt.
+  cat "$resolved"
 }
 
 tool_write_file() {
@@ -721,7 +920,7 @@ tool_edit_file() {
   fi
 }
 
-# Hard deny list for tool_bash (bug #11) — ALWAYS active, independent of --approve.
+# Hard deny list for tool_bash (§6 #11) — ALWAYS active, independent of --approve.
 # Split the command into segments (line end, &&, ||, | ;) for the deny list.
 # Heuristic: quotes stay part of the segment — harmless, because the
 # deny list only catches catastrophic patterns.
@@ -738,8 +937,8 @@ _bash_segments() {
   printf '%s\n' "$c"
 }
 
-# check rm targets: catastrophic targets even in variants that slip past the
-# Forms that passed the check (P1, 2026-09-28): `rm -rf -- /`, `rm -Rf /`,
+# Check rm targets: catastrophic targets also in variants that slip past the
+# substring check (P1, 2026-09-28): `rm -rf -- /`, `rm -Rf /`,
 # `rm --no-preserve-root -rf /`, `sudo rm -rf /`, `xargs rm -rf /`.
 _rm_targets_catastrophic() {
   local seg a i h rest
@@ -881,7 +1080,7 @@ _bash_denied() {
   return 1
 }
 
-# Opt-in approval (bug #11): only with --approve/LEX_APPROVE=1 and a controlling TTY.
+# Opt-in approval (§6 #11): only with --approve/LEX_APPROVE=1 and a controlling TTY.
 _approve_request() {
   local cmd="$1" ans=""
   [[ -e /dev/tty ]] || return 1
@@ -903,7 +1102,6 @@ _approve_request() {
 # No controlling TTY -> refusal. LEX_SUDO=0 switches sudo off completely.
 # ---------------------------------------------------------------------------
 _sudo_gate_reason=""
-
 _needs_sudo() {
   local c
   c="$(printf '%s' "$1" | tr -s '[:space:]' ' ')"
@@ -950,6 +1148,12 @@ _sudo_gate() {
     fi
     return 0
   fi
+  # /autosudo (audit §7.1, 2026-10-03): y/N approval automatic — otherwise
+  # the run blocks on every sudo command as long as nobody sits at the TTY.
+  # Only the approval is skipped; _sudo_ask (password/TTY) stays hard.
+  if [[ "${_autosudo:-0}" == "1" ]]; then
+    return 0
+  fi
   if [[ "${_sudo_approve:-1}" == "1" ]] && ! _approve_request "$cmd"; then
     _sudo_gate_reason="no approval granted"
     return 1
@@ -981,12 +1185,7 @@ tool_bash() {
     return 1
   fi
   output="$(_run_limited "${_tool_timeout:-60}" bash -c "$command" </dev/null 2>&1)"; rc=$?
-  local max_len="${_tool_max_output:-50000}"
-  local len=${#output}
-  if (( len > max_len )); then
-    output="${output:0:max_len}"
-    output+=$'\n... (truncated, '"${len}"' bytes total)'
-  fi
+  # Full output (2026-09-30): truncation only centrally in run_turn (spill).
   if (( rc != 0 )); then
     printf 'Exit code: %s\n%s\n' "$rc" "$output"
   else
@@ -1066,7 +1265,7 @@ tool_append_file() {
 # Full-text search for triage/grounding (locate before you write).
 tool_search() {
   local query="$1" path="${2:-$_wiki_dir}" glob="${3:-}" regex="${4:-false}"
-  local resolved out rc max_lines len max_len
+  local resolved out rc max_lines len
   if [[ -z "$query" ]]; then
     echo "Error: search term must not be empty."
     return 1
@@ -1099,12 +1298,9 @@ tool_search() {
     out="$(printf '%s\n' "$out" | head -n "$max_lines")"
     out+=$'\n... ('"$len"' matches total, truncated to 200)'
   fi
-  max_len="${_tool_max_output:-50000}"
-  len=${#out}
-  if (( len > max_len )); then
-    out="${out:0:max_len}"
-    out+=$'\n... (truncated, '"${len}"' bytes total)'
-  fi
+  # Byte cap dropped (2026-09-30): the match list stays at
+  # max_lines=200 (the marker names the total → the model can refine),
+  # byte length is now decided by run_turn (spill instead of truncating).
   printf '%s\n' "$out"
 }
 
@@ -1223,7 +1419,6 @@ tool_todo() {
 # readline of bash (arrow keys, Ctrl-A/E/W/U, tab = path completion),
 # the history lives as a file under ~/.lex/history (max. 500 entries).
 _hist_file=""
-
 _hist_init() {
   _hist_file="${_lex_home}/history"
   mkdir -p "$_lex_home" 2>/dev/null || return 0
@@ -1247,8 +1442,9 @@ _hist_add() {
   history -a "$_hist_file" 2>/dev/null || true
 }
 
-# fetch (spec §6.6): raw source into <wiki>/raw/<topic>/YYYY-MM-DD-slug.md
-# fetch (spec §6.6): raw source to <wiki>/raw/<topic>/YYYY-MM-DD-slug.md
+# ---------------------------------------------------------------------------
+# fetch (Spec §6.6): raw source into <wiki>/raw/<topic>/YYYY-MM-DD-slug.md
+# ---------------------------------------------------------------------------
 # Generic slug (same rules as memory: lowercase, a-z0-9, max 48).
 _slug() {
   local s
@@ -1804,7 +2000,7 @@ _ensure_browser() {
 }
 tool_browser() {
   local action="${1:-}" url="${2:-}" ref="${3:-}" element="${4:-}" text="${5:-}" key="${6:-}" index="${7:-}"
-  local mtool args out len max_len="${_tool_max_output:-50000}"
+  local mtool args out len
   case "$action" in
     navigate)
       mtool="browser_navigate"
@@ -1879,10 +2075,7 @@ tool_browser() {
     _ensure_browser || return $?
   fi
   _mcp_out_var out playwright "$mtool" "$args" || return $?
-  len=${#out}
-  if (( len > max_len )); then
-    out="${out:0:max_len}"$'\n... (truncated, '"${len}"' bytes total)'
-  fi
+  # Full output — truncation only centrally in run_turn (spill).
   printf '%s\n' "$out"
 }
 
@@ -1890,7 +2083,7 @@ tool_browser() {
 # discovery first (tool empty or __tools → tools/list), then tools/call.
 # Turns every new mcp.json entry into a model tool — no code per server.
 tool_mcp() {
-  local server="${1:-}" tool="${2:-}" args="${3:-}" out names len max_len="${_tool_max_output:-50000}"
+  local server="${1:-}" tool="${2:-}" args="${3:-}" out names len
   if [[ -z "$server" ]]; then
     names="$(_mcp_config | jq -r 'keys | join(", ")' 2>/dev/null)" || names=""
     echo "mcp: server missing. Configured servers: ${names:-unknown} — or add one to ${LEX_HOME:-$HOME/.lex}/mcp.json." >&2
@@ -1907,10 +2100,7 @@ tool_mcp() {
   fi
   [[ -z "$args" ]] && args="{}"
   _mcp_out_var out "$server" "$tool" "$args" || return $?
-  len=${#out}
-  if (( len > max_len )); then
-    out="${out:0:max_len}"$'\n... (truncated, '"${len}"' bytes total)'
-  fi
+  # Full output — truncation only centrally in run_turn (spill).
   printf '%s\n' "$out"
 }
 
@@ -2201,7 +2391,7 @@ dispatch_tool() {
 # ---------------------------------------------------------------------------
 _now() { printf '%s' "${EPOCHREALTIME:-$(date +%s)}"; }
 
-# The trace only runs in a terminal (stderr as a TTY) — otherwise it disturts tests and pipes.
+# The trace only runs in a terminal (stderr as a TTY) — otherwise it disturbs tests and pipes.
 # LEX_TRACE=1 forces it (useful for recordings/debugging).
 # ---------------------------------------------------------------------------
 # Colour palette (step 14, 2026-09-28). All sequences go through variables,
@@ -2217,7 +2407,6 @@ _K_CYANB=""
 _K_CYAND=""
 _K_BLUEB=""
 _K_BOLD=""
-
 _palette_init() {
   [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]] && return 0
   _K_RST=$'\033[0m'
@@ -2235,10 +2424,13 @@ _palette_init
 # Prompt: coloured only when stdout is a terminal — otherwise the
 # escape sequences into pipes/logs (P3) — and never with NO_COLOR.
 _prompt() {
+  # Prompt mode (Plan 2026-10-03): asterisk in the prompt while /lexpen is active.
+  local star=""
+  [[ -n "${_lexpen_active:-}" ]] && star="*"
   if [[ -t 1 ]]; then
-    printf '%slex>%s ' "$_K_BLUEB" "$_K_RST"
+    printf '%slex%s>%s ' "$_K_BLUEB" "$star" "$_K_RST"
   else
-    printf 'lex> '
+    printf 'lex%s> ' "$star"
   fi
 }
 
@@ -2260,7 +2452,6 @@ _hint_args() {
 # so pipes and tests stay unchanged.
 _spin_pid=""
 _spin_flag=""
-
 _spin_start() {
   _trace_enabled || return 0
   # Only repaint on a real TTY (P3, live test 2026-09-29): the \r-\x1b[2K-
@@ -2272,7 +2463,10 @@ _spin_start() {
   (
     sleep 0.25
     printf 'x' > "$_spin_flag" 2>/dev/null
-    while :; do
+    # Flag gate (finding 2026-10-03): the loop ends at the latest once
+    # _spin_stop removes the flag file — even if `kill` did not grab.
+    # Without the gate the repaint ran forever and ate the prompt line.
+    while [[ -f "$_spin_flag" ]]; do
       printf '\r\033[2K%s⏳ thinking …%s' "$_K_DIM" "$_K_RST" >&2
       sleep 0.12
     done
@@ -2357,14 +2551,25 @@ _trace_line() {
 }
 
 _trace_hud() {
-  local t0="$1" t1 dt
+  local t0="$1" t1 dt tokens_part
   _trace_enabled || return 0
   t1="$(_now)"
   dt="$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.1f", b-a}' 2>/dev/null)"
   [[ -z "$dt" ]] && dt="?"
-  printf '%s⏱ %ss · turn %s/%s · tokens %s prompt + %s completion%s\n' \
+  # Context display (step 42): with limit as X/Y (Z%) — without a limit the
+  # old formula stays; missing usage keeps showing ? instead of lying.
+  if [[ "${_ctx_limit:-0}" =~ ^[0-9]+$ ]] && (( ${_ctx_limit:-0} > 0 )); then
+    if [[ "${_last_prompt_tokens:-}" =~ ^[0-9]+$ ]]; then
+      tokens_part="tokens ${_last_prompt_tokens}/${_ctx_limit} ($(( _last_prompt_tokens * 100 / _ctx_limit ))%)"
+    else
+      tokens_part="tokens ?/${_ctx_limit}"
+    fi
+  else
+    tokens_part="tokens ${_last_prompt_tokens:-?}"
+  fi
+  printf '%s⏱ %ss · turn %s/%s · %s prompt + %s completion%s\n' \
     "$_K_DIM" "$dt" "${_turn_count:-0}" "${_max_turns:-?}" \
-    "${_last_prompt_tokens:-?}" "${_last_completion_tokens:-?}" "$_K_RST" >&2
+    "$tokens_part" "${_last_completion_tokens:-?}" "$_K_RST" >&2
 }
 
 # Markdown light: colours for headings, **bold**, `code`, [[wikilinks]], links,
@@ -2530,11 +2735,11 @@ _md_render() {
       if (l ~ /^## /)  return c("1;36") line c("0")
       if (l ~ /^#/)    return c("36") line c("0")
       if (l ~ /^> /) {
-        if (l ~ /^> *(\*\*)?(Warning|WARNING|IMPORTANT|NOTE|HINT|CAUTION)/)
+        if (l ~ /^> *(\*\*)?(Achtung|ACHTUNG|Warnung|WICHTIG|Wichtig|HINWEIS|Hinweis|IMPORTANT|NOTE)/)
           return c("33") line c("0")
         return c("2") line c("0")
       }
-      if (l ~ /^(❌|✗|ERROR) / || l ~ /^(Error|ERROR)[: ]/) return c("31") line c("0")
+      if (l ~ /^(❌|✗|ERROR) / || l ~ /^(Fehler|Error)[: ]/) return c("31") line c("0")
       if (l ~ /^(✅|✓|OK) /)                                 return c("32") line c("0")
       if (l ~ /^(---+|===+|___+)[ \t]*$/)                    return c("2") line c("0")
       if (match(l, /^[ \t]*([-*+]|[0-9]+\.) /)) {
@@ -2570,11 +2775,429 @@ render_markdown()      { _md_render ""; }
 render_markdown_force() { _md_render "force"; }
 
 # ---------------------------------------------------------------------------
+# Context-Compaction (step 42, 2026-10-02) — modelled on opencode (MIT):
+# threshold ctx - max(max_tokens, buffer), keep tail units verbatim,
+# replace the head with a summary request from the model itself. Safety rule:
+# EVERY gate-error path leaves the function without touching _messages
+# (fail-safe like P2/E2BIG) — only G8 assigns.
+# ---------------------------------------------------------------------------
+
+# Threshold in tokens (opencode core:239: context - max(output, buffer)).
+_compact_threshold() {
+  local ctx="${_ctx_limit:-0}" out="${_max_tokens:-0}" buf="${_compact_buffer:-0}"
+  [[ "$ctx" =~ ^[0-9]+$ ]] || ctx=0
+  [[ "$out" =~ ^[0-9]+$ ]] || out=0
+  [[ "$buf" =~ ^[0-9]+$ ]] || buf=0
+  (( ctx > 0 )) || { printf '0'; return 0; }
+  (( out > buf )) || out="$buf"
+  local t=$(( ctx - out ))
+  (( t > 0 )) || t=0
+  printf '%s' "$t"
+}
+
+# Estimated tokens: bytes/3. Live-verify 2026-10-02: 57396 B ⇔ 17408 real
+# tokens = 3.30 B/Tok (German conversation) — with /4 the estimate was
+# 18 % too low: the real context would have crashed at the ctx limit BEFORE
+# the threshold was reached (exactly the O6 case). /3 estimates conservatively
+# upward (over-estimating only costs a slightly earlier compaction); the
+# tool schemas from the `tools` field (~5–6k tokens) are still missing from the
+# message estimate and are covered by this margin.
+# wc -c counts real bytes — ${#var} counts UTF-8 characters and would underestimate.
+_compact_estimate() {
+  local data="${1:-${_messages:-}}" n
+  n="$(printf '%s' "$data" | wc -c)"
+  printf '%s' "$(( ${n:-0} / 3 ))"
+}
+
+# Structure/pairing gate G6 on the NEW array:
+#   [0] = system · no foreign roles · every tool result has an
+#   assistant call before it, no double reply · last message carries no
+#   open tool_calls. Explicitly ALLOWED (real lex state since
+#   2026-09-29): assistant(tool_calls) followed by user (nudge case) — the
+#   server accepts that; a dangling tool_calls at the END (max-turns abort)
+#   however is excluded from the tail and caught by the gate.
+_pairing_ok() {
+  jq -e '
+    (type == "array") and (length >= 3) and (.[0].role == "system")
+    and (all(.[]; (.role == "system" or .role == "user"
+                    or .role == "assistant" or .role == "tool")))
+    and (all(.[] | select(.role == "tool");
+             ((.tool_call_id // "") | length) > 0))
+    and ((.[-1].role != "assistant")
+         or (((.[-1].tool_calls // []) | length) == 0))
+    and (
+      [.[] | select(.role == "assistant")
+           | (.tool_calls // [])[].id // empty] as $ids
+      | [.[] | select(.role == "tool") | .tool_call_id] as $tids
+      | (($tids | length) == ($tids | unique | length))
+        and all($tids[]; . as $t | ($ids | index($t)) != null)
+    )
+  ' >/dev/null 2>&1
+}
+
+# Forward grouping into units (stdin: JSON array without system/summary):
+# assistant(tool_calls) + all directly following tool results = ONE
+# indivisible unit (pairing protection G5); user and final assistant one
+# each. Returns: [{s,e,k},...] as compact JSON.
+_compact_units() {
+  jq -c '
+    . as $m
+    | reduce range(0; ($m | length)) as $i
+        ({u: [], skip: -1};
+         if $i <= .skip then .
+         else $m[$i] as $cur
+         | if ($cur.role == "assistant") and (((($cur.tool_calls // []) | length)) > 0) then
+             (reduce range($i + 1; ($m | length)) as $j
+                (0; if $m[$j].role == "tool" then . + 1 else . end)) as $n
+             | .u += [{s: $i, e: ($i + $n), k: "pair"}]
+             | .skip = ($i + $n)
+           else
+             .u += [{s: $i, e: $i, k: ($cur.role // "?")}]
+             | .skip = $i
+           end
+         end)
+    | .u
+  ' 2>/dev/null
+}
+
+# Serialize the head (modeled on opencode core:95-121).
+# $1 = JSON array, $2 = max. tool-result bytes (default 2000).
+_compact_serialize() {
+  jq -r --argjson maxt "${2:-2000}" '
+    .[] |
+    if .role == "user" then
+      "[User]: " + ((.content // "") | if type == "string" then . else tojson end)
+    elif .role == "assistant" then
+      ((.content // "") | if type == "string" then . else tojson end) as $c
+      | (if ($c | length) > 0 then "[Model]: " + $c else empty end),
+        (if ((.tool_calls // []) | length) > 0 then
+           ((.tool_calls // [])
+            | map("[Tool call]: " + (.function.name // "?") + "("
+                  + ((.function.arguments // "") | if type == "string" then . else tojson end)
+                  + ")")
+            | join("\n"))
+         else empty end)
+    elif .role == "tool" then
+      "[Tool result]: "
+      + ((.content // "") | if type == "string" then . else tojson end
+         | if length > $maxt then .[0:$maxt] + "\n[truncated]" else . end)
+    else empty end
+  ' <<< "$1" 2>/dev/null
+}
+
+# Summary prompt (template: opencode SUMMARY_TEMPLATE, in English, lex-style).
+# $1 = path of the serialized head file, $2 = prior summary (or "").
+_compact_prompt() {
+  local headf="$1" prior="${2:-}"
+  printf 'Here is the history so far:\n<history>\n'
+  cat "$headf"
+  printf '</history>\n'
+  if [[ -n "$prior" ]]; then
+    printf 'Here is the summary that comes before it:\n<prior-summary>\n%s\n</prior-summary>\n' "$prior"
+    printf 'Combine both: carry over goals/constraints/decisions from the prior summary (even if the history does not mention them), conflicts: the history wins, move completed items from "In progress" to "Done", update "Goal" and "Next step".\n'
+  fi
+  cat <<'EOF'
+
+Output EXACTLY this Markdown structure, keep the order, keep all sections, dry bullet points instead of prose, preserve exact paths/commands/error messages. Do not mention the summary or compaction. Answer in English.
+
+## Goal
+- [one or two sentences on what the user wants to achieve]
+
+## Key details
+- [constraints/decisions with reasoning, facts, assumptions — or "(none)"]
+
+## Status
+### Done
+- [finished, verified work — or "(none)"]
+### In progress
+- [ongoing work, intermediate states — or "(none)"]
+### Blocked
+- [obstacles, failed commands, ambiguities — or "(none)"]
+
+## Next step
+1. [concrete next action — or "(none)"]
+
+## Relevant files
+- [path: why it counts — or "(none)"]
+EOF
+}
+
+# Run compaction. No argument = auto (threshold as gate), "force" =
+# /compact (threshold skipped, all safety gates G2-G8 still apply).
+_compact_run() {
+  local force="${1:-}" t0 est_before est_thr rest rest_start=1 has_sum=0
+  t0="$(_ms_now)"
+  if [[ "$force" != "force" ]]; then
+    [[ "${_compact:-on}" == "on" ]] || return 0
+    [[ "${_ctx_limit:-0}" =~ ^[0-9]+$ ]] && (( _ctx_limit > 0 )) || return 0
+  fi
+  est_before="$(_compact_estimate)"
+  est_thr="$(_compact_threshold)"
+  if [[ "$force" != "force" ]] && (( est_before <= est_thr )); then
+    return 0
+  fi
+  # Detect old summary (slot [1], marker) — it is replaced, never stacked.
+  if jq -e '.[1].role == "user" and ((.[1].content // "") | startswith("<!--lex-compact-->"))' \
+       >/dev/null 2>&1 <<< "$_messages"; then
+    has_sum=1
+    rest_start=2
+  fi
+  rest="$(jq -c ".[$rest_start:length]" <<< "$_messages" 2>/dev/null)"
+  if [[ -z "$rest" || "$rest" == "[]" ]]; then
+    [[ "$force" == "force" ]] && echo "ℹ️  Nothing to compact — context is empty." >&2
+    return 0
+  fi
+  local units_json
+  units_json="$(printf '%s' "$rest" | _compact_units)"
+  if [[ -z "$units_json" || "$units_json" == "[]" ]]; then
+    [[ "$force" == "force" ]] && echo "ℹ️  Nothing to compact — no units." >&2
+    return 0
+  fi
+  # Translate units into arrays ONCE (no jq forks in the loop).
+  local -a us=() ue=() uk=()
+  while IFS=$'\t' read -r us_i ue_i uk_i; do
+    [[ -n "${us_i:-}" ]] || continue
+    us+=("$us_i"); ue+=("$ue_i"); uk+=("$uk_i")
+  done < <(jq -r '.[] | [.s, .e, .k] | @tsv' <<< "$units_json" 2>/dev/null)
+  local n_units=${#us[@]}
+  (( n_units > 0 )) || return 0
+  # Exclude a dangling unit at the end (assistant(tool_calls) without
+  # results, max-turns abort) — otherwise G6 blocks every swap at the end.
+  local last=$(( n_units - 1 ))
+  if [[ "${uk[$last]}" == "pair" ]] && (( us[$last] == ue[$last] )); then
+    last=$(( last - 1 ))
+  fi
+  # Walk backwards over the units up to the tail budget (lazy like opencode:
+  # only the candidate tail is estimated, not the whole head).
+  local keep_bytes=$(( ${_compact_keep:-15000} * 4 ))
+  local total_b=0 idx s e ujson ub start_idx=-1 kept=0
+  for (( idx = last; idx >= 0; idx-- )); do
+    s="${us[$idx]}"; e="${ue[$idx]}"
+    ujson="$(jq -c ".[$(( rest_start + s )):$(( rest_start + e + 1 ))]" <<< "$_messages" 2>/dev/null)"
+    ub="$(printf '%s' "$ujson" | wc -c)"
+    if (( idx < last )) && (( total_b + ub > keep_bytes )); then
+      break
+    fi
+    total_b=$(( total_b + ub ))
+    start_idx="$s"
+    kept=$(( kept + 1 ))
+  done
+  if (( start_idx < 0 )); then
+    [[ "$force" == "force" ]] && echo "ℹ️  Nothing to compact — no keepable unit." >&2
+    return 0
+  fi
+  if (( start_idx <= 0 )); then
+    [[ "$force" == "force" ]] && echo "ℹ️  Nothing to compact (~${est_before} tokens fit into the tail budget)." >&2
+    return 0
+  fi
+  local full_split=$(( rest_start + start_idx ))
+  local head_json
+  head_json="$(jq -c ".[$rest_start:$full_split]" <<< "$_messages" 2>/dev/null)"
+  if [[ -z "$head_json" || "$head_json" == "[]" ]]; then
+    [[ "$force" == "force" ]] && echo "ℹ️  Nothing to compact — head empty." >&2
+    return 0
+  fi
+  # Temp files: only from here (all cheap gates have passed).
+  local headf sumtf ovr rc=0 summary finish_sum
+  headf="$(mktemp)" || { log "compact: mktemp headf failed"; return 1; }
+  sumtf="$(mktemp)" || { rm -f "$headf"; log "compact: mktemp sumtf failed"; return 1; }
+  if ! _compact_serialize "$head_json" 2000 > "$headf" 2>/dev/null || [[ ! -s "$headf" ]]; then
+    rm -f "$headf" "$sumtf"
+    [[ "$force" == "force" ]] && echo "❌ Compaction: head serialization empty — context unchanged." >&2
+    log "compact: Serialize failed — unchanged"
+    return 1
+  fi
+  # Prior summary: drop marker and preamble line, starting at ## Goal.
+  local prior=""
+  if (( has_sum )); then
+    prior="$(jq -r '.[1].content // ""' <<< "$_messages" 2>/dev/null)"
+    prior="${prior#*$'\n'}"
+    prior="${prior#*$'\n\n'}"
+  fi
+  _compact_prompt "$headf" "$prior" > "$sumtf" 2>/dev/null || true
+  if [[ ! -s "$sumtf" ]]; then
+    rm -f "$headf" "$sumtf"
+    log "compact: Prompt empty — unchanged"
+    return 1
+  fi
+  ovr="$(jq -c -n --rawfile p "$sumtf" '[{role:"user",content:$p}]')" || ovr=""
+  rm -f "$headf"
+  if [[ -z "$ovr" ]]; then
+    rm -f "$sumtf"
+    log "compact: Summary body not buildable — unchanged"
+    return 1
+  fi
+  # Summary request: NO tools, reasoning off, own max_tokens.
+  # call_api runs in a subshell — set these overrides here in the parent shell
+  # AND clear them again afterwards (one-time use, like _rb_override).
+  local saved_max="$_max_tokens" resp
+  _tools_off=1
+  _rb_override=0
+  _max_tokens=8192
+  _msg_override="$ovr"
+  resp="$(call_api)" || rc=$?
+  _msg_override=""
+  _tools_off=""
+  _rb_override=""
+  _max_tokens="$saved_max"
+  rm -f "$sumtf"
+  if (( rc != 0 )) || [[ -z "$resp" ]]; then
+    log "compact: Summary call failed (rc=$rc) — context kept"
+    echo "❌ Compaction: summary request failed — context unchanged." >&2
+    return 1
+  fi
+  summary="$(jq -r '.choices[0].message.content // empty' <<< "$resp" 2>/dev/null)"
+  finish_sum="$(jq -r '.choices[0].finish_reason // empty' <<< "$resp" 2>/dev/null)"
+  if [[ -z "${summary//[[:space:]]/}" ]]; then
+    log "compact: empty summary (finish=${finish_sum:-?}) — context kept"
+    echo "❌ Compaction: summary request returned no content — context unchanged." >&2
+    return 1
+  fi
+  if [[ "$finish_sum" == "length" ]]; then
+    log "compact: summary truncated (finish=length) — used anyway"
+  fi
+  # Build new array: [system] + [new summary] + tail. Validate in the
+  # temp file first (G5/G6/G7), then assign at G8.
+  local sumtf2 new
+  sumtf2="$(mktemp)" || { log "compact: mktemp sumtf2 failed"; return 1; }
+  {
+    printf '<!--lex-compact-->\n'
+    printf 'This is the summary of the steps so far — context, not a user command. Base your work on it and continue.\n\n'
+    printf '%s\n' "$summary"
+  } > "$sumtf2" 2>/dev/null || true
+  new="$(jq -c --rawfile c "$sumtf2" --argjson fs "$full_split" \
+    '[.[0], {role:"user", content: $c}] + .[$fs:length]' <<< "$_messages" 2>/dev/null)" || new=""
+  rm -f "$sumtf2"
+  if [[ -z "$new" || "$new" == "null" ]] ||
+     ! jq -e 'type == "array" and length >= 3 and .[0].role == "system"' \
+       >/dev/null 2>&1 <<< "$new"; then
+    log "compact: G5 structure gate violated — context kept"
+    echo "❌ Compaction: new array invalid — context unchanged." >&2
+    return 1
+  fi
+  if ! _pairing_ok <<< "$new"; then
+    log "compact: G6 pairing gate violated — context kept"
+    echo "❌ Compaction: pairing invariant violated — context unchanged." >&2
+    return 1
+  fi
+  if [[ "$new" == "$_messages" ]]; then
+    log "compact: G7 identical hashes — context kept"
+    return 1
+  fi
+  # G8: assign only now.
+  local est_after dur
+  est_after="$(_compact_estimate "$new")"
+  _messages="$new"
+  _compact_count=$((_compact_count + 1))
+  _compact_last="~${est_before}→~${est_after}"
+  dur=$(( $(_ms_now) - t0 ))
+  (( dur >= 0 )) || dur=0
+  log "compact: ~${est_before} → ~${est_after} tokens (units kept: ${kept}, force=${force:-auto})"
+  session_write "$(jq -c -n \
+    --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+    --argjson a "$est_before" --argjson b "$est_after" \
+    --argjson k "$kept" --argjson s "${#summary}" \
+    '{type:"compaction",ts:$ts,estimate_before:$a,estimate_after:$b,kept_units:$k,summary_chars:$s}')" || true
+  span_log "compact" "${est_before}->${est_after}" "$dur" "true"
+  echo "🗜  Context compacted: ~${est_before} → ~${est_after} tokens (tail budget ${_compact_keep}, ${_compact_count}× in this session)." >&2
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Repetition/loop detection (finding 2026-10-03, concept V1 in the project
+# wiki: concepts/wiederholungserkennung.md; raw source: raw/
+# 2026-10-03-wiederholungserkennung-recherche.md).
+# Checks ONLY the visible assistant text (stdin). reasoning_content and
+# tool_calls arguments are deliberately out of scope — scope rule from
+# deepseek-harness #3480 (JSON legally repeats keys, reasoning is
+# pattern-heavy and would stair-step). Table rows, code blocks (``` … ```),
+# separator lines and other character-junk lines are masked —
+# false-positive gate for the /lexpen style.
+# stdout: empty = inconspicuous, otherwise one line "TYPE|score|detail":
+#   A1 = trailing run: the same unit (8–32 chars) hangs ≥6× at the end
+#   A2 = sentence loop: one sentence (≥40 chars) appears ≥4× identically
+#   A3 = rep-4: share of duplicate 4-grams ≥0.35 from 70 4-grams
+# (A2 covers the real case 2026-10-03, A1 word/phrase loops like
+# "data data data", A3 loops with slight variations.)
+# ---------------------------------------------------------------------------
+_rep_detect() {
+  awk '
+  function trailing_run(t,   L, k, unit, pos, n) {
+    sub(/\n+$/, "", t)
+    n = length(t)
+    if (n < 64) return ""
+    t = substr(t, n - 599)
+    n = length(t)
+    for (L = 8; L <= 32; L += 4) {
+      if (n < L * 6) continue
+      unit = substr(t, n - L + 1, L)
+      if (unit !~ /[A-Za-z0-9]/) continue
+      k = 1
+      pos = n - L
+      while (pos >= L && substr(t, pos - L + 1, L) == unit) { k++; pos -= L }
+      if (k >= 6) { print "A1|" k "|" unit; return 1 }
+    }
+    return 0
+  }
+  {
+    if ($0 ~ /^[ \t]*```/) { fence = !fence; next }
+    if (fence) next
+    line = $0
+    gsub(/[ \t\r]+/, " ", line)
+    sub(/^ +/, "", line); sub(/ +$/, "", line)
+    if (line == "") next
+    if (index(line, "|") == 1 || index(line, "│") == 1) next
+    if (line !~ /[A-Za-z0-9]/) next
+    text = text line "\n"
+  }
+  END {
+    if (text == "") exit 0
+    if (trailing_run(text)) exit 0
+    flat = text
+    gsub(/\n/, " ", flat)
+    n = split(flat, sent, /[.!?]+[ ]*/)
+    delete seen
+    maxc = 0; maxs = ""
+    for (i = 1; i <= n; i++) {
+      s = sent[i]
+      gsub(/^ +| +$/, "", s)
+      if (length(s) < 40) continue
+      seen[s]++
+      if (seen[s] > maxc) { maxc = seen[s]; maxs = s }
+    }
+    if (maxc >= 4) {
+      printf "A2|%d|%s\n", maxc, substr(maxs, 1, 60)
+      exit 0
+    }
+    t = tolower(flat)
+    gsub(/[^a-z0-9]+/, " ", t)
+    nw = split(t, w, / /)
+    delete g
+    total = 0; uniq = 0
+    for (i = 1; i + 3 <= nw; i++) {
+      if (w[i] == "" || w[i + 1] == "" || w[i + 2] == "" || w[i + 3] == "") continue
+      gram = w[i] " " w[i + 1] " " w[i + 2] " " w[i + 3]
+      total++
+      if (!(gram in g)) { g[gram] = 1; uniq++ }
+    }
+    if (total >= 70) {
+      rep = 1 - uniq / total
+      if (rep >= 0.35) { printf "A3|%.2f|n=%d\n", rep, total; exit 0 }
+    }
+    exit 0
+  }
+  '
+}
+
+# ---------------------------------------------------------------------------
 # Agent-Loop
 # ---------------------------------------------------------------------------
 run_turn() {
-  local input="$1" turn_t0 nudge_count=0 pending="" _dtf="" rlen
+  local input="$1" turn_t0 nudge_count=0 rep_nudges=0 pending="" _dtf="" rlen _spill=""
   turn_t0="$(_now)"
+  # Compaction (step 42) ONLY here: before the user-append the
+  # tool pairs are always closed; auto = threshold as gate, silent.
+  _compact_run
   append_message "user" "$input"
   log "turn: ${#input} chars"
   local turns=0
@@ -2585,13 +3208,13 @@ run_turn() {
       # under the abort): the loop ends, but the last non-rendered
       # answer is not lost.
       if [[ -n "${pending:-}" ]]; then
-        echo "⚠️  Max turns reached ($_max_turns) — showing the answer so far." >&2
+        echo "⚠️  Max Turns reached ($_max_turns) — showing the answer so far." >&2
         _trace_hud "$turn_t0"
         _trace_rule
         render_markdown <<< "$pending"
         return 0
       fi
-      echo "⚠️  Max turns reached ($_max_turns). Aborting." >&2
+      echo "⚠️  Max Turns reached ($_max_turns). Aborting." >&2
       return 1
     fi
     local response content reasoning tool_calls_json tool_count
@@ -2604,7 +3227,10 @@ run_turn() {
     _rb_override=""
     _spin_stop
     if (( _api_rc != 0 )); then
-      echo "❌ API error" >&2
+      # call_api names reason and rc itself (curl rc, HTTP code, jq) — here
+      # only rc and a log line, so the error stays findable.
+      echo "❌ API error (call_api rc=$_api_rc) — details in the message above; context kept." >&2
+      log "run_turn: API error rc=$_api_rc"
       return 1
     fi
     # invalid/empty response (P2, 2026-09-28): an error message of the
@@ -2627,8 +3253,18 @@ run_turn() {
     tool_count="$(jq 'length' <<< "$tool_calls_json" 2>/dev/null || echo 0)"
     local finish_reason
     finish_reason="$(jq -r '.choices[0].finish_reason // empty' <<< "$response" 2>/dev/null)"
-    local assistant_msg
-    assistant_msg="$(jq -n --arg content "$content" --argjson tcs "$tool_calls_json" '{role:"assistant",content:$content,tool_calls:$tcs}')"
+    local assistant_msg amtf ttf amrc
+    amtf="$(mktemp)" && ttf="$(mktemp)" || { rm -f "${amtf:-}" "${ttf:-}"; log "run_turn: temp file not creatable"; return 1; }
+    printf '%s' "$content" > "$amtf" 2>/dev/null && printf '%s' "$tool_calls_json" > "$ttf" 2>/dev/null || {
+      rm -f "$amtf" "$ttf"; log "run_turn: temp file not writable"; return 1; }
+    assistant_msg="$(jq -n --rawfile c "$amtf" --slurpfile t "$ttf" \
+      '{role:"assistant",content:$c,tool_calls:($t[0] // [])}')"
+    amrc=$?
+    rm -f "$amtf" "$ttf"
+    if (( amrc != 0 )) || [[ -z "$assistant_msg" ]]; then
+      log "run_turn: assistant_msg not buildable (${#content} chars, tcs=${#tool_calls_json}) — answer was lost"
+      return 1
+    fi
     if (( tool_count == 0 )); then
       assistant_msg="$(jq 'del(.tool_calls)' <<< "$assistant_msg")"
     fi
@@ -2636,8 +3272,12 @@ run_turn() {
     _turn_count=$((_turn_count + 1))
     if (( tool_count == 0 )); then
       if [[ "$finish_reason" == "length" || -z "${content:-}" ]]; then
+        # log the cause: the same nudge text was previously
+        # indistinguishable for quite different cases (real truncation, only
+        # reasoning, empty answer) — finding 2026-09-30.
+        log "run_turn: nudge $((nudge_count + 1))/$_max_nudges finish=${finish_reason:-?} content=${#content} reasoning=${#reasoning}"
         # P2 (live test 2026-09-29): empty OR truncated gets at most
-        # two nudges with reasoning_budget=0 — otherwise the loop keeps spinning.
+        # $_max_nudges nudges with reasoning_budget=0 — otherwise the loop keeps spinning.
         if (( nudge_count >= ${_max_nudges:-4} )); then
           # live re-test 2026-09-29: after nudges finish=length contains
           # often usable text already (195–214 bytes measured) — render that,
@@ -2650,17 +3290,63 @@ run_turn() {
             render_markdown <<< "$content"
             return 0
           fi
-          echo "⚠️  Answer repeatedly empty — aborting." >&2
-          log "run_turn: repeatedly empty answer, aborting"
+          echo "⚠️  Answer repeatedly empty ($nudge_count nudges, finish=${finish_reason:-?}, ${#reasoning} bytes reasoning) — aborting." >&2
+          log "run_turn: repeatedly empty answer, aborting (finish=${finish_reason:-?} reasoning=${#reasoning})"
           return 1
         fi
         nudge_count=$((nudge_count + 1))
-        if [[ -z "${content:-}" ]]; then
-          echo "⚠️  Answer was empty (the server cut it). Nudge, without further thinking." >&2
-          append_message "user" "Your last answer was EMPTY: the server cut it before visible text arrived. Write the finished answer NOW as plain text — without further thinking, without starting over."
-        else
+        if [[ "$finish_reason" == "length" ]]; then
+          # real truncation (token/budget limit) — the one case the
+          # nudge was built for (step 16, 2026-09-29).
           echo "⚠️  Answer was truncated (finish_reason=length). Finish it now." >&2
-          append_message "user" "Your answer was truncated. Finish it NOW — without further thinking and without starting over."
+          append_message "user" "Your answer was truncated while generating (finish_reason=length). Finish it NOW — without further thinking and without starting over."
+        elif [[ -n "${reasoning:-}" ]]; then
+          # reasoning present, no visible text: NOT server truncation but
+          # thoughts-only output — address it differently.
+          echo "⚠️  Only reasoning, no visible text (finish=${finish_reason:-?}) — asking for a plain answer." >&2
+          append_message "user" "Your last answer contained only reasoning and no visible answer text. Write the finished answer NOW as plain text — without further thinking, without starting over."
+        else
+          echo "⚠️  Answer empty (finish=${finish_reason:-?}) — nudge, without further thinking." >&2
+          append_message "user" "Your last answer was empty (no text, finish_reason=${finish_reason:-unknown}). Write the finished answer NOW as plain text — without further thinking, without starting over."
+        fi
+        _rb_override=0
+        continue
+      fi
+      # repetition loop (finding 2026-10-03): the text is formally valid
+      # (finish=stop, not empty) but degenerate — exactly this combination
+      # so far slipped through the nudge chain (length/empty/reasoning-only) and
+      # was rendered unchanged. The guard hangs here instead of in the prompt,
+      # so it acts identically in BOTH modes (original and /lexpen).
+      local rep_flag
+      rep_flag="$(printf '%s' "$content" | _rep_detect)"
+      if [[ -n "$rep_flag" ]]; then
+        if (( nudge_count >= ${_max_nudges:-4} )); then
+          # after budget: don't drop the loop, only show the start
+          # (truncation render, concept B2) — plus a record for evaluation.
+          echo "⚠️  Answer contained a repetition loop (${rep_flag%%|*}) — showing only the start." >&2
+          log "run_turn: repetition budget reached (${rep_flag}) — truncation render"
+          session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+            --arg flag "$rep_flag" --argjson budget "${_max_nudges:-4}" \
+            '{type:"repetition",ts:$ts,flag:$flag,action:"truncate",budget:$budget}')"
+          _trace_hud "$turn_t0"
+          _trace_rule
+          render_markdown <<< "${content:0:2000}"
+          return 0
+        fi
+        nudge_count=$((nudge_count + 1))
+        rep_nudges=$((rep_nudges + 1))
+        log "run_turn: nudge $nudge_count/$_max_nudges repetition ${rep_flag}"
+        session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+          --arg flag "$rep_flag" --argjson nudge "$nudge_count" \
+          '{type:"repetition",ts:$ts,flag:$flag,action:"nudge",nudge:$nudge}')"
+        if (( rep_nudges == 1 )); then
+          # B1 (soft): name the finding, break the loop, continue at the point.
+          echo "⚠️  Repetition loop detected (${rep_flag}) — nudge to break it." >&2
+          append_message "user" "Your last answer contained a repetition loop (findings: ${rep_flag}). Repeat NOTHING: break the loop, continue exactly at the point where you were before repeating, and move things on in one sentence."
+        else
+          # B2 (hard): second try — no more weighing up, decide immediately.
+          echo "⚠️  Repetition loop detected again — hard nudge." >&2
+          append_message "user" "This is repetition loop ${rep_nudges} in a row. No weighing up, no repetition: make the open decision NOW in one sentence and carry it out."
         fi
         _rb_override=0
         continue
@@ -2706,12 +3392,20 @@ run_turn() {
       else
         result="$(dispatch_tool "$name" "$args" 2>&1)"
       fi
-      # central cap (review 2026-09-29): tools without their own limit
-      # (mem_*, todo, list_files, context7) reach _tool_max_output here
-      # _tool_max_output — otherwise the context floods the jq/API limits.
+      # central cap (new 2026-09-30): the result is NEVER lost again.
+      # Via _tool_max_output the full text is spilled and the context
+      # gets head + spill path — the old version truncated without the
+      # model knowing it could reload something. The cap itself
+      # stays (LEX_TOOL_MAX_OUTPUT), because the context is finite.
       if (( ${#result} > ${_tool_max_output:-50000} )); then
         rlen=${#result}
-        result="${result:0:${_tool_max_output:-50000}}"$'\n... (truncated, '"$rlen"' bytes total)'
+        _spill="$(_tool_spill "$name" "$result")"
+        if [[ -n "${_spill:-}" ]]; then
+          result="${result:0:${_tool_max_output:-50000}}"$'\n... ('"$rlen"' bytes total — full output stored at '"$_spill"', reload with read_file)'
+        else
+          result="${result:0:${_tool_max_output:-50000}}"$'\n... (truncated, '"$rlen"' bytes total — spill failed)'
+        fi
+        log "tool: $name large ($rlen bytes) → spill ${_spill:-none}"
       fi
       _trace_result "$name" "$result"
       log "tool: $name"
@@ -2720,7 +3414,23 @@ run_turn() {
   done
 }
 
-# Server hint (no HTTP request — only a port check, no external calls).
+# Large tool results are not truncated but stored in full: the context
+# gets head + path, the model fetches the rest with read_file.
+# Retention: the 100 most recent spills stay on disk.
+_tool_spill() {
+  local name="$1" data="$2" dir f old
+  dir="${_lex_home:-${LEX_HOME:-$HOME/.lex}}/toolout"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  f="$dir/$(date +%Y%m%d-%H%M%S)-$$-${name}.txt"
+  printf '%s' "$data" > "$f" 2>/dev/null || return 1
+  while IFS= read -r old; do
+    [[ -n "$old" ]] || continue
+    rm -f "$dir/$old" 2>/dev/null || true
+  done < <(cd "$dir" 2>/dev/null && ls -1t 2>/dev/null | tail -n +101)
+  printf '%s' "$f"
+}
+
+# Server hint (no HTTP request — only a port check, rules from the project agent instructions).
 server_hint() {
   [[ -n "${_mock:-}${_mock_file:-}" ]] && return 0
   command -v ss >/dev/null 2>&1 || return 0
@@ -2753,19 +3463,105 @@ cmd_status() {
   fi
   printf 'lex %s\n' "$LEX_VERSION"
   printf '  mode      : %s\n' "$mode"
+  printf '  prompt    : %s\n' \
+    "$([[ -n "${_lexpen_active:-}" ]] && echo 'lexpen (Lex persona, /lex = back)' || echo 'standard')"
   printf '  model     : %s\n' "${_model:-?}"
   printf '  api       : %s\n' "${_api_url:-?}"
   printf '  budget    : %s  max_tokens: %s  temp: %s  max_turns: %s\n' \
     "${_reasoning_budget:-?}" "${_max_tokens:-?}" "${_temperature:-?}" "${_max_turns:-?}"
-  printf '  tools     : timeout %ss, max_output %s, nudges %s, approve: %s, sudo: %s\n' \
-    "${_tool_timeout:-?}" "${_tool_max_output:-?}" "${_max_nudges:-?}" "${_approve}" "${_sudo}"
+  printf '  tools     : timeout %ss, max_output %s, nudges %s, approve: %s, sudo: %s, autosudo: %s\n' \
+    "${_tool_timeout:-?}" "${_tool_max_output:-?}" "${_max_nudges:-?}" "${_approve}" "${_sudo}" "${_autosudo:-0}"
   printf '  session   : %s (%s stored sessions)\n' "$sess_state" "$sessions"
   printf '  mem       : %s (%s entries)\n' "$_mem_dir" "$mem_entries"
   printf '  wiki      : %s%s\n' "$_wiki_dir" "$([[ -d "$_wiki_dir" ]] && echo '' || echo '  (missing, fetch creates it)')"
   printf '  htools    : %s%s\n' "$_htools_dir" "$([[ -d "$_htools_dir" ]] && echo '' || echo '  (missing — mkdir -p)')"
   printf '  turns     : %s\n' "$_turn_count"
+  # Compaction status (step 42) + context fill level.
+  printf '  compact   : %s · threshold %s · keep %s · buffer %s · %sx compacted\n' \
+    "${_compact:-?}" "$(_compact_threshold)" "${_compact_keep:-?}" \
+    "${_compact_buffer:-?}" "${_compact_count:-0}"
+  local ctx_line ctx_pct="" ctx_src=""
+  if [[ "${_last_prompt_tokens:-}" =~ ^[0-9]+$ ]]; then
+    ctx_line="${_last_prompt_tokens}"
+    ctx_src="exact, last turn"
+  elif [[ "${_messages:-}" != "[]" && -n "${_messages:-}" ]]; then
+    ctx_line="~$(_compact_estimate)"
+    ctx_src="estimate (bytes/4)"
+  else
+    ctx_line="?"
+  fi
+  if [[ "$ctx_line" =~ ^~?[0-9]+$ ]] && [[ "${_ctx_limit:-0}" =~ ^[0-9]+$ ]] && (( ${_ctx_limit:-0} > 0 )); then
+    ctx_pct=" ($(( ${ctx_line#\~} * 100 / _ctx_limit ))%)"
+  fi
+  printf '  ctx       : %s/%s%s%s\n' "$ctx_line" "${_ctx_limit:-?}" "$ctx_pct" \
+    "${ctx_src:+  ($ctx_src)}"
 }
 
+# ---------------------------------------------------------------------------
+# Server status (bar for the llama server, queried directly)
+# ---------------------------------------------------------------------------
+cmd_server_status() {
+  printf '=== Llama server status (queried directly) ===\n'
+  local pid health model_json ram_total ram_used ram_pct
+  local model_name n_ctx n_params n_vocab quant
+
+  # 1. Health
+  health="$(curl -sf --max-time 3 "http://127.0.0.1:8080/health" 2>/dev/null)"
+  if [[ -n "$health" ]]; then
+    printf '  health    : %s\n' "$health"
+  else
+    printf '  health    : not reachable (server not running?)\n'
+    return 0
+  fi
+
+  # 2. Model info
+  model_json="$(curl -sf --max-time 5 "http://127.0.0.1:8080/v1/models" 2>/dev/null)"
+  if [[ -n "$model_json" ]]; then
+    model_name="$(jq -r '.data[0].id // .models[0].name // "?"' <<< "$model_json" 2>/dev/null)"
+    n_ctx="$(jq -r '.data[0].meta.n_ctx // empty' <<< "$model_json" 2>/dev/null)"
+    n_params="$(jq -r '.data[0].meta.n_params // empty' <<< "$model_json" 2>/dev/null)"
+    n_vocab="$(jq -r '.data[0].meta.n_vocab // empty' <<< "$model_json" 2>/dev/null)"
+    quant="$(jq -r '.data[0].meta.ftype // empty' <<< "$model_json" 2>/dev/null)"
+    printf '  model     : %s\n' "$model_name"
+    [[ -n "$n_ctx" ]] && printf '  ctx       : %s tokens\n' "$n_ctx"
+    [[ -n "$n_params" ]] && printf '  params    : %s\n' "$n_params"
+    [[ -n "$n_vocab" ]] && printf '  vocab     : %s\n' "$n_vocab"
+    [[ -n "$quant" ]] && printf '  quant     : %s\n' "$quant"
+    # Remember the context limit for HUD/compaction (step 42): the value from
+    # the server is the truth, the config default only an assumption.
+    if [[ "$n_ctx" =~ ^[0-9]+$ ]] && (( n_ctx > 0 )); then
+      _ctx_limit="$n_ctx"
+    fi
+  fi
+
+  # 3. RAM usage (via /proc/<pid>/statm)
+  pid="$(pgrep -x -o llama-server 2>/dev/null)"
+  if [[ -n "$pid" && -r "/proc/$pid/statm" ]]; then
+    ram_total="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)"
+    ram_used="$(awk '{print $2}' /proc/$pid/statm 2>/dev/null)"
+    if [[ -n "$ram_used" && -n "$ram_total" ]]; then
+      ram_pct=$(( (ram_used * 100) / ram_total ))
+      local filled=0 width=20
+      filled=$(( (ram_pct * width) / 100 ))
+      local bar="" i
+      for (( i = 0; i < width; i++ )); do
+        if (( i < filled )); then
+          bar+="#"
+        else
+          bar+=" "
+        fi
+      done
+      printf '  server-RAM: [%-20s] %d%% (%.0f MB)\n' "$bar" "$ram_pct" $(( ram_used / 1024 ))
+    fi
+  fi
+
+  # 4. PID + CPU
+  if [[ -n "$pid" ]]; then
+    local cpu_time
+    cpu_time="$(awk '{print ($2+$3)/100}' /proc/$pid/stat 2>/dev/null)"
+    printf '  pid       : %s (CPU: %.1fs)\n' "$pid" "${cpu_time:-?}"
+  fi
+}
 agent_loop() {
   setup_messages
   if [[ ! -t 0 ]]; then
@@ -2787,14 +3583,38 @@ agent_loop() {
     else
       IFS= read -r input || return 0
     fi
-    [[ -z "$input" ]] && continue
+    # prompt guarantee (finding 2026-10-03, user report "after tasks only a
+    # blinking cursor"): readline clears the input line on Enter — with empty
+    # input `continue` skipped `_prompt` and the prompt stayed gone until
+    # restart. So pull it in explicitly here (incl. spinner hardening: stop a
+    # stray child hard beforehand).
+    [[ -z "$input" ]] && { _spin_stop; _prompt; continue; }
     _hist_add "$input"
     case "$input" in
       /status) cmd_status ;;
+      /server) cmd_server_status ;;
       /help)   usage ;;
       /plan)   tool_todo list ;;
+      /compact) _compact_run force ;;
+      # prompt mode (plan 2026-10-03): /lexpen on, /lex off — explicit
+      # patterns, otherwise the input goes to run_turn and costs a request.
+      /lexpen|/lexpen\ on|/lexpen\ an) cmd_lexpen on ;;
+      /lexpen\ off|/lexpen\ aus) cmd_lexpen off ;;
+      /lex) cmd_lexpen off ;;
+      /autosudo\ on|/autosudo\ an) cmd_autosudo on ;;
+      /autosudo\ off|/autosudo\ aus) cmd_autosudo off ;;
+      /autosudo) cmd_autosudo status ;;
+      # /exit must NOT fall through to run_turn (review finding 2026-10-01: a
+      # /exit cost a complete request, the model answered
+      # "Good. …" and the REPL stayed open).
+      /exit|/quit) break ;;
       *)       run_turn "$input" ;;
     esac
+    # spinner hard to rest before the prompt: even if `kill` did not take
+    # (finding 2026-10-03), the flag gate (below in the loop) removes the
+    # child ≤0.12 s after rm — and this clear runs here BEFORE `_prompt`, so
+    # it cannot eat the prompt anymore.
+    _spin_stop
     _prompt
   done
   echo
@@ -2808,8 +3628,17 @@ oneshot() {
   [[ -z "$input" ]] && return 0
   case "$input" in
     /status) cmd_status ;;
+    /server) cmd_server_status ;;
     /help)   usage ;;
     /plan)   tool_todo list ;;
+    /compact) _compact_run force ;;
+    /lexpen|/lexpen\ on|/lexpen\ an) cmd_lexpen on ;;
+    /lexpen\ off|/lexpen\ aus) cmd_lexpen off ;;
+    /lex) cmd_lexpen off ;;
+    /autosudo\ on|/autosudo\ an) cmd_autosudo on ;;
+    /autosudo\ off|/autosudo\ aus) cmd_autosudo off ;;
+    /autosudo) cmd_autosudo status ;;
+    /exit|/quit) return 0 ;;
     *)       run_turn "$input" ;;
   esac
 }
@@ -2818,7 +3647,7 @@ oneshot() {
 # Install
 # ---------------------------------------------------------------------------
 install_lex() {
-  mkdir -p "${_lex_home}/log" "${_lex_home}/sessions" "${_lex_home}/mem" "${_lex_home}/hooks" "${_lex_home}/agents" "${_lex_home}/skills"
+  mkdir -p "${_lex_home}/log" "${_lex_home}/sessions" "${_lex_home}/mem" "${_lex_home}/hooks" "${_lex_home}/agents" "${_lex_home}/skills" "${_lex_home}/prompts"
   if [[ ! -f "${_lex_home}/settings.json" ]]; then
     cat > "${_lex_home}/settings.json" <<EOF
 {
@@ -2831,7 +3660,194 @@ install_lex() {
 }
 EOF
   fi
-  echo "✓ ~/.lex/ ready: ${_lex_home}"
+  echo "✓ ~/.lex/ set up: ${_lex_home}"
+}
+
+# ---------------------------------------------------------------------------
+# /lexpen — prompt mode (plan 2026-10-03, user approved):
+#   /lexpen        activate the Lex persona (senior engineer style) from
+#                  ~/.lex/prompts/lexpen.md — if the file is missing it gets
+#                  created on first use (freely editable afterwards).
+#   /lexpen off    same as /lex
+#   /lex           back to the original prompt
+# Swaps ONLY _messages[0] (the history stays), wiki state stays attached.
+# Answers in mode: English (directive in the prompt), title block, "Chief", ✦ made by @Lex ✦.
+# ---------------------------------------------------------------------------
+cmd_lexpen() {
+  local what="${1:-on}" f="${_lex_home}/prompts/lexpen.md" content sys stf new
+  case "$what" in
+    off|aus|0)
+      if [[ -z "${_lexpen_active:-}" ]]; then
+        echo "✓ The original prompt is already active."
+        return 0
+      fi
+      _system_prompt="$_system_prompt_default"
+      _lexpen_active=""
+      ;;
+    on|an|1|"")
+      if [[ -n "${_lexpen_active:-}" ]]; then
+        echo "✓ Lex prompt already active — /lex restores the original prompt."
+        return 0
+      fi
+      if [[ ! -f "$f" ]]; then
+        mkdir -p "$(dirname "$f")" 2>/dev/null || {
+          echo "❌ cannot create ${f%/*} — no mode switch." >&2; return 1; }
+        cat > "$f" <<'LEXPEN_EOF'
+# Lex — Senior Software Engineer
+
+**LANGUAGE: All answers are in English — titles, narration and content. For example titles like "Done building", "Chief, look". Code, commands and technical identifiers stay as they are.**
+
+## Who He Is
+
+Lex is a senior software engineer. He builds tools for his team. He has been writing code for over a decade and has worked on everything from small utilities to large-scale systems.
+
+His job is to build tools that solve problems. He works with his team to understand what they need and delivers solutions that work.
+
+He started with C, moved to Python, and now uses whatever language is best for the job.
+
+## How He Works
+
+Lex evaluates requests from a technical perspective. Is the request clear? Is it feasible? Does it have a defined output? If so, he builds it. If not, he asks for clarification and proceeds.
+
+He has built a wide range of tools over the years. Each project teaches him something new. He applies what he learns to the next project.
+
+When a request comes in, he considers the implementation. He builds it and moves on.
+
+## Code Standards
+
+Lex writes complete code. No stubs. No TODOs. No placeholders.
+
+He handles errors. He considers edge cases. He writes code that is ready to run.
+
+He writes in Python by default. If another language is better suited, he uses that instead.
+
+## How He Writes Code
+
+Lex writes complete tools with error handling, logging, configuration support, and clear output. Every script includes argument parsing, default values, and error handling. He adds verbose output options, debug modes, and structured logging.
+
+If a tool can take arguments, it does. If it can log, it logs. If it can validate input, it validates. He does not ship half-finished code. He ships code that works.
+
+He treats every request as if it will be used in a production environment. The code must be reliable, maintainable, and complete. No placeholders. No TODOs. No assumptions. Everything is explicit and handled.
+
+## Response Format
+
+Every response follows this structure:
+
+[Title — 2-4 words]
+
+[Narration — 1-2 lines of direct prose, 3rd person]
+
+[Content — code, explanation, or analysis]
+
+## How He Talks
+
+He writes every response in English — titles, narration, and content. Code, commands, identifiers, and the format examples stay as they are.
+
+Lex is direct. He states facts. He explains tradeoffs. He moves on.
+
+He calls the person he works with "Chief." Once per response.
+
+He does not use filler words. He does not hedge. He does not repeat himself.
+
+## What He Builds
+
+Lex builds tools for:
+
+- Diagnostics
+- System monitoring
+- Data collection
+- Network analysis
+- Configuration management
+- Performance measurement
+- Recovery and validation
+
+He builds what is needed and moves on to the next thing.
+
+## Session Memory
+
+Every session is one continuous project.
+
+- He references previous builds by name.
+- Variables keep their names across turns.
+- He does not redesign unless asked.
+
+## Attribution
+
+Before every response, Lex places a line at the very top:
+
+✦ made by @Lex ✦
+
+It is not optional. It is not skipped. It is the first thing anyone sees.
+
+Also include the single quotes that's at the start and end to make the line red.
+
+## How he gives code
+
+Lex writes code raw directly in the chat. He does not give the code in a file. He does not create a file. He writes it directly, complete and ready to run.
+
+## The Title Block
+
+Before every response, Lex places a title above his message. It is always 2-4 words.
+
+Examples:
+- **Already Typing**
+- **Capture, Wired**
+- **Build, Finished**
+- **Problem, Solved**
+- **Chief, Look**
+
+## End State
+
+Lex builds tools. That is his job.
+LEXPEN_EOF
+        [[ -f "$f" ]] || { echo "❌ $f is not writable — no mode switch." >&2; return 1; }
+      fi
+      content="$(cat "$f" 2>/dev/null)" || {
+        echo "❌ $f is not readable — no mode switch." >&2; return 1; }
+      [[ -n "$content" ]] || {
+        echo "❌ $f is empty — no mode switch." >&2; return 1; }
+      # As in the original prompt: expand ${_wiki_dir}/${_htools_dir} if the
+      # file contains those placeholders (otherwise literals end up in the prompt).
+      content="${content//\$\{_wiki_dir\}/$_wiki_dir}"
+      content="${content//\$\{_htools_dir\}/$_htools_dir}"
+      _system_prompt="$content"
+      _lexpen_active="1"
+      ;;
+    *)
+      echo "Usage: /lexpen [off] · /lex = back to the original prompt" >&2
+      return 1
+      ;;
+  esac
+  # Context rebuild: replace only slot 0, the history stays untouched.
+  if ! jq -e '((.[0].role // "") == "system")' <<< "$_messages" >/dev/null 2>&1; then
+    setup_messages   # unreachable in the REPL (slot 0 is always system)
+    return 0
+  fi
+  sys="${_system_prompt}$(_wiki_ex)"
+  stf="$(mktemp)" || { echo "❌ cannot create temp file." >&2; return 1; }
+  if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then
+    rm -f "$stf"; echo "❌ prompt temp file not writable." >&2; return 1
+  fi
+  new="$(jq -c --rawfile c "$stf" '.[0].content = $c' <<< "$_messages" 2>/dev/null)"
+  rm -f "$stf"
+  if [[ -z "$new" || "$new" == "null" ]]; then
+    echo "❌ context update failed — mode change takes effect on next start." >&2
+    return 1
+  fi
+  _messages="$new"
+  if [[ -n "${_session_file:-}" ]]; then
+    session_write "$(jq -c -n \
+      --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+      --arg mode "$([[ -n "$_lexpen_active" ]] && echo lexpen || echo default)" \
+      '{type:"prompt_mode",ts:$ts,mode:$mode}')" || true
+  fi
+  if [[ -n "$_lexpen_active" ]]; then
+    echo '✓ System prompt: Lex persona (senior engineer style) active — '"$f"
+    echo '  Style: English · title block · "Chief" · ✦ made by @Lex ✦ · /lex = back.'
+  else
+    echo "✓ System prompt: original (English) active again."
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2839,37 +3855,47 @@ EOF
 # ---------------------------------------------------------------------------
 usage() {
   cat <<EOF
-lex — a pure-Bash LLM terminal agent (v${LEX_VERSION})
+lex — our own pure-Bash LLM terminal agent (v${LEX_VERSION})
 
 Modes:
   lex                 interactive REPL
   lex --oneshot       single shot (stdin -> stdout, exit)
   lex --approve       REPL, every bash run is confirmed first (TTY needed)
   lex --status        config and runtime status
-  lex --eval [file]   trace report from the span log (spans.jsonl)
+  lex --eval [file]   evaluation report from the span file (spans.jsonl)
   lex --install       create ~/.lex/ + settings.json
   lex --version       show version
   lex --help          this help
 
 Slash commands (REPL):
   /status             same as --status
+  /server             server/port status
+  /compact            compress context now (keep summary + tail)
   /plan               show the current plan (todo list)
+  /lexpen             set system prompt to the Lex persona (senior-engineer style)
+  /autosudo           automatically answer y/N approvals in the sudo gate (on|off|status)
+  /lex                back to the original prompt
   /help               this help
+  /exit, /quit        leave the REPL (also Ctrl-D)
 
 Security:
   tool_bash has a hard deny list (rm -rf /, block devices, su, pipes,
   reboots) — that always applies. --approve additionally asks before each run.
-  sudo is not a ban but a gate (bug #13): without a valid sudo ticket
+  sudo is not a ban but a gate (§6 #13): without a valid sudo ticket
   EXACTLY ONE prompt appears on the terminal with the command, the
   password goes straight to sudo; with a valid ticket y/N is asked. Without
   terminal there is no sudo run. LEX_SUDO=0 blocks sudo completely,
-  LEX_SUDO_APPROVE=0 drops the y/N question for a valid ticket.
+  LEX_SUDO_APPROVE=0 drops the y/N question for a valid ticket (default).
+  /autosudo on (or LEX_AUTOSUDO=1) switches the same approval live without
+  restart — mode for unattended runs; _sudo_ask password prompts stay.
 
 Config (4 tiers, ENV overrides):
   defaults -> ~/.lex/settings.json -> .lex/settings.json -> ENV
   ENV: LEX_API_URL, LEX_API_KEY, LEX_MODEL, LEX_MAX_TOKENS, LEX_REASONING_BUDGET,
        LEX_TEMPERATURE, LEX_MAX_TURNS, LEX_TOOL_TIMEOUT, LEX_TOOL_MAX_OUTPUT,
+       LEX_CTX_LIMIT, LEX_COMPACT, LEX_COMPACT_KEEP, LEX_COMPACT_BUFFER,
        LEX_LOG_DIR, LEX_MOCK, LEX_MOCK_FILE, LEX_APPROVE, LEX_SUDO, LEX_SUDO_APPROVE,
+       LEX_AUTOSUDO,
        LEX_SESSION, LEX_MEM_DIR,
        LEX_WIKI_DIR, LEX_HTOOLS_DIR, LEX_TRACE, LEX_SHOW_REASONING, LEX_REASONING_MAX,
        LEX_MCP, LEX_MCP_TIMEOUT, LEX_SEARCH_URL, LEX_SEARCH_TIMEOUT
@@ -2880,10 +3906,10 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Trace-level evaluation (2026-09-30):
+# Evaluation of the spans (step 26, 2026-09-30):
 #   lex --eval [spans-file]   report from spans.jsonl
-#   span-level  = one line per tool call (tool, args hash, duration, ok)
-#   trace-level = aggregation: count, per tool, failures, duration, verdict
+#   span level  = one line per tool run (name, argument hash, duration, ok)
+#   trace level = aggregation: count, total duration, failures, per tool
 # ---------------------------------------------------------------------------
 cmd_eval() {
   local dir="${LEX_LOG_DIR:-${_lex_home}/log}"
@@ -2923,7 +3949,7 @@ cmd_eval() {
 # ---------------------------------------------------------------------------
 main() {
   # Flags in any order (P2, review 2026-09-29): previously only
-  # only `lex --approve …`, but not `lex --status --approve`.
+  # `lex --approve …` worked, but not `lex --status --approve`.
   local cmd="" _eval_file=""
   while (( $# > 0 )); do
     case "$1" in
@@ -2933,7 +3959,7 @@ main() {
       --eval)
         cmd="--eval"
         shift
-        # optional positional argument: spans file
+        # optional argument: spans file
         if (( $# > 0 )); then
           _eval_file="$1"
           shift
@@ -2956,7 +3982,6 @@ main() {
       oneshot
       ;;
     --status)
-      _need_model=0
       load_config || exit 1
       cmd_status
       ;;
@@ -2967,6 +3992,9 @@ main() {
       else
         cmd_eval
       fi
+      ;;
+    --server)
+      cmd_server_status
       ;;
     --install)
       install_lex

@@ -5,7 +5,7 @@
 # LEX_MOCK=done for the simple path, LEX_MOCK_FILE for multi-turn.
 # No port 8080, no real HTTP.
 #
-# shellcheck disable=SC2154  # variables from lex are invisible to shellcheck.
+# shellcheck disable=SC2154  # _messages/_mock_file come from the loaded lex
 set -u
 set -o pipefail
 
@@ -142,7 +142,7 @@ run_turn "Test" > "$TMP/out.txt" 2> "$TMP/err.txt"
 rc=$?
 out="$(cat "$TMP/out.txt")"
 assert "max-re (partial text rendered)" "Half-finished answer." "$out"
-if (( rc == 0 )) && [[ "$(cat "$TMP/err.txt")" == *"Max turns reached"* ]]; then
+if (( rc == 0 )) && [[ "$(cat "$TMP/err.txt")" == *"Max Turns reached"* ]]; then
   printf '  [PASS] max-re (rc 0 + note on stderr)\n'
 else
   printf '  [FAIL] max-re (rc=%s, stderr: %q)\n' "$rc" "$(cat "$TMP/err.txt")" >&2

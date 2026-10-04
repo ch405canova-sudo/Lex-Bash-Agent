@@ -69,17 +69,21 @@ else
   FAIL=1
 fi
 
-# 12b. tool_read_file: output cap (E2BIG protection, step 17b)
+# 12b. tool_read_file: delivers the file in full — _tool_max_output no longer
+#      applies per tool but centrally in run_turn (spill instead of excerpt;
+#      the old state "truncate + byte count" meant E2BIG protection, which
+#      today no longer exists on the message path). Completeness: test_limits.sh.
 big="$TMP/big.txt"
 : > "$big"
 i=0; while (( i < 40 )); do printf 'aaaaaaaaaa\n' >> "$big"; i=$((i + 1)); done
 _tool_max_output=5
 out="$(tool_read_file "$big")"
 _tool_max_output=50000
-if [[ "$out" == aaaaa* && "$out" == *"truncated"*"bytes total"* ]]; then
-  printf '  [PASS] read_file (cap + byte count)\n'
+exp="$(cat "$big")"
+if [[ "$out" == "$exp" && "$out" != *"truncated"* ]]; then
+  printf '  [PASS] read_file (full file despite _tool_max_output)\n'
 else
-  printf '  [FAIL] read_file (cap): %q\n' "$out" >&2
+  printf '  [FAIL] read_file (full file): %q\n' "$out" >&2
   FAIL=1
 fi
 
@@ -116,11 +120,13 @@ fi
 out="$(printf 'x\n' | tool_bash "cat")"
 assert "bash (ignores stdin)" "" "$out"
 
-# 18. tool_bash: truncation note with a real line break (no literal \n)
+# 18. tool_bash: no more shortening through _tool_max_output (the old version
+#     attached an abort note here — it lay before the spill, which today
+#     applies in run_turn: head + spill path instead of excerpt)
 _tool_max_output=5
 out="$(tool_bash "printf 'aaaaaaaaaa'")"
 _tool_max_output=50000
-assert "bash (truncation line break)" $'aaaaa\n... (truncated, 10 bytes total)' "$out"
+assert "bash (full output despite _tool_max_output)" "aaaaaaaaaa" "$out"
 
 # 19. tool_list_files: existing directory
 out="$(tool_list_files "$TMP/a/b" 2>/dev/null)"

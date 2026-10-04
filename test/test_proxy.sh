@@ -51,7 +51,7 @@ if (( busy == 0 )); then pass "ports free"; fi
 if bash -n "$PROXY"; then pass "syntax"; else fail "syntax"; fi
 
 # 2. start the fake upstream
-printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"thinking briefly.","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":11}}' \
+printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Taugt.","reasoning_content":"thinking briefly","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":11}}' \
   > "$TMP/responses.json"
 FAKE_PID="$("$SCRIPT_DIR/fake_server.sh" "$FAKE_PORT" "$TMP/responses.json" 2>/dev/null)" || FAKE_PID=""
 if [[ -n "$FAKE_PID" ]]; then pass "fake upstream started ($FAKE_PORT)"; else fail "fake upstream started"; fi
@@ -69,7 +69,7 @@ fi
 BODY="$TMP/body.json"
 python3 - "$BODY" <<'PY'
 import json, sys
-json.dump({"model": "test-model",
+json.dump({"model": "test-modell",
            "messages": [{"role": "user", "content": "ü" * 3000}],
            "max_tokens": 4096, "reasoning_budget_tokens": 4096,
            "tools": [{"type": "function", "function": {"name": "bash"}}]},
@@ -80,14 +80,14 @@ code="$(curl -sS --max-time 30 -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/com
         -H 'Content-Type: application/json' -d @"$BODY" -o "$TMP/resp.json" -w '%{http_code}')"
 if [[ "$code" == "200" ]]; then pass "pass-through (HTTP 200, $blen byte body)"; else fail "pass-through (HTTP $code)"; fi
 content="$(jq -r '.choices[0].message.content // ""' "$TMP/resp.json" 2>/dev/null || printf '')"
-if [[ "$content" == "Works." ]]; then pass "upstream answer came back unchanged"; else fail "answer: $content"; fi
+if [[ "$content" == "Taugt." ]]; then pass "upstream answer came back unchanged"; else fail "answer: $content"; fi
 if jq -e . >/dev/null 2>&1 "$TMP/resp.json"; then pass "response is valid JSON"; else fail "response is valid JSON"; fi
 
 # 5. log written?
 tdir="$TMP/.proxy"
 if [[ -s "$tdir/traffic.log" ]]; then pass "traffic.log present"; else fail "traffic.log present"; fi
 tlog="$(cat "$tdir/traffic.log" 2>/dev/null)"
-for needle in "POST /v1/chat/completions" "HTTP/1.1 200 OK" "rb=4096" "finish=stop" "reasoning=17"; do
+for needle in "POST /v1/chat/completions" "HTTP/1.1 200 OK" "rb=4096" "finish=stop" "reasoning=16"; do
   if [[ "$tlog" == *"$needle"* ]]; then pass "log contains '$needle'"; else fail "log contains '$needle'"; fi
 done
 

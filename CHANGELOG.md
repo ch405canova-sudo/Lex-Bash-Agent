@@ -8,7 +8,76 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
 ### Added
 
-- **Observability: span-level logging + `lex --eval` (2026-09-30):**
+- **Repetition/loop detection (step 46):** `_rep_detect` checks the visible
+  assistant text in `run_turn` before rendering in three ways —
+  A1 trailing run (the same 8–32-character unit ≥6× at the end), A2
+  sentence loop (one sentence ≥40 characters identical ≥4×), A3 rep-4
+  (share of duplicate 4-grams ≥0.35 from 70 4-grams); code blocks, table
+  rows and separators are masked (false-positive gate for the `/lexpen`
+  style), `reasoning_content` and tool_calls arguments are never in scope
+  (scope rule from deepseek-harness #3480). Reaction: 1st hit = soft
+  nudge, 2nd hit = hard "decide now in one sentence" nudge, then a
+  truncation render (2000 characters) instead of the loop output — all
+  against the existing `_max_nudges` budget, plus a log line and a
+  session record `{type:repetition}`. The guard hangs on the code, not
+  on the prompt → equally effective in the original and in `/lexpen`
+  mode. New runner `test/test_repetition.sh` (+20 → **709** = 696
+  individual checks + 13 runners).
+- **`/autosudo` + address/download rule in the system prompt (step 45):**
+  slash `/autosudo on|off|status` (env `LEX_AUTOSUDO=1`) skips only the
+  y/N approval in `_sudo_gate` — password/TTY questions in `_sudo_ask`
+  stay manual; fixes the y/N blocker of the step-45 runs (two hangs of
+  24/13 minutes each). Prompt bullet "never guess addresses & downloads":
+  GitHub owners/release tags/assets only from sources (repo root status →
+  expanded_assets → verification, under 1 kB = error page), no release =
+  go install/source build. Live proof in the follow-up run: 3× sudo
+  without blocking, 0 guessed GitHub owners. Finding while writing: the
+  prompt range anchor in `test_features.sh` broke → prompt bullets
+  swapped, test unchanged.
+
+- **Prompt mode `/lexpen` (step 43):** slash `/lexpen` swaps slot 0 of the
+  context for the senior-engineer persona from
+  `~/.lex/prompts/lexpen.md` (created on first call, XP4→Lex, freely
+  editable afterwards), `/lex` or `/lexpen off` switches back to the
+  original — history and wiki state are kept (`_wiki_ex()`), session
+  record `{type:prompt_mode}`, prompt marker `lex*>`, `prompt` line in
+  `/status`, slash list in `usage()`. Answers in the mode: English (prompt
+  directive), title block, "Chief", `✦ made by @Lex ✦`. Live verify on the
+  real model (persona answer with attribution + nmap run; afterwards `/lex`
+  → English again). +22 checks in `test_features.sh` → **691** total.
+- **Context compaction + context HUD (step 42):** new slash `/compact`
+  (force) and an auto-trigger in `run_turn` compress old messages as soon
+  as the estimated prompt exceeds the threshold
+  `ctx − max(max_tokens, buffer)` (default 242144 → inert): `_pairing_ok`
+  as a jq gate (roles/`tool_call_id`/no open `tool_calls`), forward-unit
+  grouping, `[User]:` token, English summary with marker
+  `<!--lex-compact-->` in slot 1, fail-safe on an empty summary
+  (`_messages` byte-identical), session record `{type:compaction}` +
+  span. Config tier `ctx_limit`/`compact`/`compact_keep`/`compact_buffer`
+  (2 + env `LEX_CTX_LIMIT`/`LEX_COMPACT`/`LEX_COMPACT_KEEP`/
+  `LEX_COMPACT_BUFFER`), HUD `tokens X/Y (Z%) prompt + …`, `/status` with
+  a `compact`/`ctx` block, `usage()` names the slash + env. New runner
+  `test/test_compaction.sh` (77 checks) — hooked in as the 12th runner in
+  `run_all.sh`. Estimator `Bytes ÷ 3` (live verify 2026-10-02 calibrated
+  against 17408 `prompt_tokens`: `/4` was 18 % too low).
+
+- **Test run `test_limits.sh` (step 38):** 17 checks that nothing is cut
+  off at the lex↔llama boundary — 280,000-byte messages in `_messages`
+  **and** the session JSONL, 250,000-byte system prompt, a whole
+  60,000-byte file via `read_file`, spill storage complete with a pointer
+  in the context, a 150,000-character server answer complete. Hooked in
+  as the 11th runner in `run_all.sh`.
+
+- **`testboden` + stream budget (step 37):** `run_all.sh` runs `testboden`
+  first — fails if a test file was deleted relative to `HEAD`, is
+  referenced as a runner but missing, or exists but is not wired in
+  (negative tests: all three directions fail → rc 1, normal → 0).
+  `test/test_sse.sh` encodes a performance budget: 3000 chunks under
+  2000 ms **and** fully evaluated (29 s back then, ~0.12 s today). Plus
+  rules in LEX.md §C/§D/§E: optimization needs a test + measurement in
+  the same change, fixture tests must be able to break the path,
+  experiments only on `opt/*` branches.
+- **Observability: span-level logging + `lex --eval` (step 36):**
   every tool run is appended as one JSONL line to `<log-dir>/spans.jsonl`
   (`span_log()`; `ts`, `name`, `args_hash`, `duration_ms`, `ok`).
   `dispatch_tool()` times each branch and takes `ok` from its exit status
@@ -17,8 +86,7 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   (count, total duration, `FAILED: n of m` / `OK` verdict, per-tool
   aggregation, latest 10 spans) via **`lex --eval [spans-file]`** —
   listed in `--help`, works without `load_config`. New runner
-  `test/test_eval.sh` (+15 checks).
-
+  `test/test_eval.sh` (16 checks).
 - **Ethical-hacker persona + H-Tools path (step 18):** new system
   prompt block "Role & expertise (ethical hacker)" — the user text
   verbatim (cybersecurity, network security, penetration testing,
@@ -108,7 +176,7 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   - `todo(action, text?, index?)` — persistent plan under
     `~/.lex/plans/`, `done` is idempotent, index = display position;
     slash command `/plan`.
-  - Config `LEX_WIKI_DIR` (default `~/.lex/wiki`) + wiki conventions
+  - Config `LEX_WIKI_DIR` (default `<wiki>`) + wiki conventions
     and planning discipline in the system prompt, `wiki` in `/status`.
 - **Interface (step 6):** CLI with a TUI feel, everything stderr-only
   on a TTY or `LEX_TRACE=1` (pipes/tests stay raw):
@@ -263,18 +331,22 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   `$LEX_HOME/browser.pid`). click/type send `target` (= ref id) as
   schema ≥0.0.83 requires.
 
-- **Tests 514 → 530 (7 → 8 runners):** new `eval` runner covers
-  `span_log`, the `dispatch_tool` instrumentation and `cmd_eval`
-  (success path, failure path, empty/missing span file, CLI flag).
+### Fixed 2026-10-03 — REPL prompt after empty Enter + spinner hardening (step 47)
 
-- **Limits raised for big tasks (full audit 2026-09-29):**
-  defaults `max_tokens` 8192 → **16384**, `reasoning_budget` 4096 →
-  **8192**, `max_turns` 100 → **200**, `tool_timeout` 60 → **300 s**;
-  nudge limit as its own default 4 (`LEX_MAX_NUDGES`) instead of a
-  hidden number; API timeout `LEX_API_TIMEOUT` (default 1800 s)
-  instead of a fixed `curl --max-time 900`; `--status` shows `nudges`.
-  Goal: no more aborts from `finish=length`, nudge limits or timeouts
-  that are too short on long generations.
+- **REPL prompt disappeared (user report "after tasks only a blinking
+  cursor"):** on empty input `[[ -z "$input" ]] && continue` skipped
+  `_prompt` — readline clears the input line on Enter, the prompt stayed
+  gone (input kept working). Now `{ _spin_stop; _prompt; continue; }`
+  plus a hard `_spin_stop` before every end-of-loop `_prompt`.
+- **Spinner hardening:** the repaint loop ran `while :;` forever — a
+  surviving child would have kept eating the prompt line. Now a flag gate
+  `while [[ -f "$_spin_flag" ]]` (ends ≤0.12 s after `_spin_stop`), the
+  erase-clear therefore always runs before the prompt.
+- **Tests +3 → 712** (699 individual checks + 13 runners): PTY test
+  (2× Enter → ≥3 `lex>`) + two static anchors in `test_input.sh`.
+- **Ancillary finding fixed:** `LEX.md` had doubled itself in commit
+  2bdbd7d (§0–§7 and §9–§13 each twice) → rebuilt on the basis of 756e10b
+  with entries 45/46 and the current numbers (811 lines).
 
 ### Fixed
 
@@ -346,6 +418,19 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   because DuckDuckGo serves a challenge page — not fixed on the lex
   side (open point: another provider/our own UA).
 
+### Changed
+
+- **Limits raised for big tasks (full audit 2026-09-29):**
+  defaults `max_tokens` 8192 → **16384**, `reasoning_budget` 4096 →
+  **8192**, `max_turns` 100 → **200**, `tool_timeout` 60 → **300 s**;
+  nudge limit as its own default 4 (`LEX_MAX_NUDGES`) instead of a
+  hidden number; API timeout `LEX_API_TIMEOUT` (default 1800 s)
+  instead of a fixed `curl --max-time 900`; `--status` shows `nudges`.
+  Goal: no more aborts from `finish=length`, nudge limits or timeouts
+  that are too short on long generations.
+
+### Fixed
+
 - **jq E2BIG in the message path:** `call_api` delivers the context
   via `--slurpfile`/temp file instead of as an exec argument (Linux
   limit 131,071 B → empty body, "❌ API error", reproduced with 193
@@ -370,9 +455,104 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   `_ensure_browser` checks the PID file (no double start on "Profile
   in use"), `source lex` in 4 test runners with an error guard.
 
+### Changed
+
+- **Streaming path in `call_api` (step 36):** answer evaluation now
+  runs in a single jq pass (`_sse_to_response`) over the stream file —
+  JSON passthrough if the body starts with `{` (classic JSON answers
+  stay possible), otherwise `reduce` over the SSE lines: content deltas
+  are concatenated, `tool_calls` merged by `index` (name/id from the
+  first delta, arguments accumulated), `usage` comes from the stream.
+  The transfer runs as `curl -o <stream> -w '%{http_code}'`, so the
+  curl return code and the HTTP status can be checked separately.
+  3000 chunks: 29 s → **0.12 s**.
+- **Nudge logic with diagnostics:** a nudge is only sent on a real
+  `finish_reason == "length"`; every nudge line lands as
+  `nudge k/max finish=… content=… reasoning=…` in the log, other cases
+  get their own messages (reasoning only, empty). The abort now names
+  the nudge count, finish_reason and the reasoning length.
+- **`test/fake_server.sh`:** extension `.sse` delivers the file as
+  `text/event-stream` (stream tests without a consumption problem), the
+  first line `STATUS:<code>|{json}` sets the HTTP status.
+
+### Fixed
+
+- **Streaming regression in `call_api` (step 36):** `rc=$?` after
+  `done < <(curl …)` was the status of the loop body instead of curl —
+  server/HTTP errors silently ended up in the nudge chain (4× "the
+  answer was empty", then "answer empty repeatedly — aborting.")
+  instead of being an API error. The tool_calls merge
+  `jq -s '.[0] + .[1]'` with two here-strings only read the last delta
+  → `name: null`, arguments as a fragment (`}`) → `tool: null` in the
+  session. `data:` without a space and streams without `[DONE]`
+  silently became empty. Fix: rc/HTTP guard, a single jq pass, server
+  tolerance, warning on a missing `[DONE]`, real `usage`; tests
+  **`test/test_sse.sh` (19)**.
+### Fixed
+
+- **No more truncation at the lex↔llama boundary (step 38):**
+  `append_message`, `append_tool_message` and `setup_messages` capped
+  at 100,000 bytes (E2BIG guard for `jq --arg`),
+  `append_message_json` and `assistant_msg` still went through
+  arguments, `tool_read_file`/`tool_bash`/`tool_search`/`tool_browser`/
+  `tool_mcp` additionally capped at `_tool_max_output` (50,000 bytes)
+  and the central cap in `run_turn` cut results off without the model
+  being able to notice. The message path now runs over files
+  (`--rawfile`/`--slurpfile`), oversized tool results are stashed by
+  `_tool_spill()` under `~/.lex/toolout/` (newest 100) and the context
+  gets a header + path. Unchanged are the display caps (`_trace_*`,
+  `render_markdown`), the 200-hit/500-entry markers and
+  `web_fetch max_length`.
+
+- **Lost parts restored:** `_ms_now`/`span_log` and `cmd_eval`
+  (`lex --eval`) were missing, `test/fake_server.sh` and
+  `test/test_http.sh` were deleted and `test_proxy.sh` sent real
+  requests to port 8080 (rule 6) — all brought back or limited to high
+  ports.
+
+- **`/exit`/`/quit` were missing (live finding 2026-10-01):** the slash
+  list only knew `/status /server /help /plan` — `/exit` fell through
+  to `run_turn`, cost a full request (the model answered "Fine. …")
+  and left the REPL open. Now `break` in the REPL or rc 0 without a
+  model call in oneshot/pipe; `usage()` lists `/server` and `/exit`.
+
+- **HUD logged invented token zeros (live finding 2026-10-01):** the
+  request body lacked `stream_options:{include_usage:true}` —
+  llama-server only delivers usage in the stream on request → every
+  turn showed `tokens 0 prompt + 0 completion`. Body supplemented
+  **and** the zero default in `_sse_to_response` removed: without a
+  usage event the HUD now shows `?` instead of lying.
+
+- **O6: no compaction/summarization (step 42):** `_messages` grew
+  without limit until the server rejected at the ctx limit — now an
+  auto-trigger before `append_message user` plus `/compact` as a force;
+  the default threshold is deliberately inert (242144), old tests keep
+  running unchanged.
+
+### Changed
+
+- **Slash commands documented:** README and `usage()` now name the full
+  list `/status`, `/server`, `/plan`, `/help`, `/exit`.
+
+- **"Working framework" in the system prompt (step 40):** a standing
+  scope instead of one per request — own systems/lab/CTF, blue-team
+  work (hardening, vulnerability analysis, malware analysis, incident
+  response, detection engineering) as core business without asking;
+  offensive terms as working vocabulary; a scope question instead of a
+  blanket refusal. Evidence: Defensive Refusal Bias
+  (arXiv 2603.01246) — authorization sentences in the *user message*
+  make refusals worse, COVER (ACL 2025) — the system prompt is the
+  effective lever.
+
+- **HUD format with ctx% (step 42):** with `ctx_limit` set, `_trace_hud`
+  shows `tokens 65536/262144 (25%) prompt + 42 completion`, without a
+  limit still the old formula, without usage `?/Y` — four old
+  assertions in `test_features.sh`/`test_sse.sh` pulled to the new
+  contract.
+
 ### This status
 
-- Tests **485 → 514** (7 runners green), `lex` 2683 → **2884 lines**,
+- Tests **591 → 669** (12 runners green), `lex` 3211 → **3622 lines**,
   `shellcheck -S warning` = 0.
 
 ## [0.1.0] — 2026-09-28

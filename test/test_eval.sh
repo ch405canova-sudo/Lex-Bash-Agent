@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# lex/test/test_eval.sh — span_log / dispatch_tool instrumentation / cmd_eval.
-# Tests span-level logging and the trace-level report.
+# lex/test/test_eval.sh — span_log / instrumentation in dispatch_tool / cmd_eval.
+# Tests the span level and the trace-level report (lex --eval).
 # No port 8080, no real HTTP.
 #
 set -u
@@ -26,8 +26,18 @@ assert() {
     FAIL=1
   fi
 }
+contains() {
+  local desc="$1" needle="$2" hay="$3"
+  if [[ "$hay" == *"$needle"* ]]; then
+    printf '  [PASS] %s\n' "$desc"
+  else
+    printf '  [FAIL] %s (search: %q)\n' "$desc" "$needle" >&2
+    printf '         text: %q\n' "$hay" >&2
+    FAIL=1
+  fi
+}
 
-# Load the script: LEX_HOME isolated, LEX_MODEL fake, mock on, stdin=/dev/null
+# load lex: LEX_HOME isolated, LEX_MODEL fake, mock on, stdin=/dev/null
 export LEX_HOME="$TMP"
 export LEX_MODEL="$TMP/model.gguf"
 export LEX_MOCK="done"
@@ -41,49 +51,44 @@ _log_dir="$TMP/log"
 
 SPAN_FILE="$TMP/log/spans.jsonl"
 
-# ============================================================================
+# ===========================================================================
 # 1. span_log: the function exists and writes valid JSONL
-# ============================================================================
+# ===========================================================================
 printf '  [INFO] span_log\n'
-if ! declare -F span_log >/dev/null 2>&1; then
-  printf '  [FAIL] span_log function does not exist\n' >&2
+if declare -F span_log >/dev/null 2>&1; then
+  printf '  [PASS] span_log present\n'
+else
+  printf '  [FAIL] span_log missing\n' >&2
   FAIL=1
 fi
 
-# call span_log
 rm -f "$SPAN_FILE"
 span_log "test_tool" '{"key":"value"}' 42 true
 if [[ -f "$SPAN_FILE" ]]; then
-  # check: valid JSONL (every line valid JSON)
   line_count=$(wc -l < "$SPAN_FILE")
   jq -s '.' "$SPAN_FILE" >/dev/null 2>&1 && json_ok=1 || json_ok=0
   if (( json_ok == 1 && line_count >= 1 )); then
     printf '  [PASS] span_log writes valid JSONL\n'
   else
-    printf '  [FAIL] span_log: invalid JSONL (lines=%d, json_ok=%d)\n' "$line_count" "$json_ok" >&2
+    printf '  [FAIL] span_log: invalid JSONL (lines=%d, json=%d)\n' "$line_count" "$json_ok" >&2
     FAIL=1
   fi
-  # check: ok is a boolean
   ok_val=$(jq -rs '.[-1].ok' "$SPAN_FILE" 2>/dev/null)
-  if [[ "$ok_val" == "true" ]]; then
-    printf '  [PASS] span_log: ok=true\n'
-  else
-    printf '  [FAIL] span_log: ok expected "true", got "%s"\n' "$ok_val" >&2
-    FAIL=1
-  fi
+  assert "span_log: ok=true" "true" "$ok_val"
+else
+  printf '  [FAIL] span_log: file missing\n' >&2
+  FAIL=1
 fi
 
-# ============================================================================
-# 2. dispatch_tool: instrumentation writes a span on a tool call
-# ============================================================================
+# ===========================================================================
+# 2. dispatch_tool: instrumentation logs one tool run
+# ===========================================================================
 printf '  [INFO] dispatch_tool\n'
-# before: no spans
 rm -f "$SPAN_FILE"
-# mock file: 1 tool call + 1 done
 MOCK="$TMP/mock_dispatch.jsonl"
 cat > "$MOCK" <<EOF
 {"choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"","tool_calls":[{"id":"tc1","type":"tool_call","function":{"name":"read_file","arguments":"{\"path\":\"$TMP/readme.txt\"}"}}]}}],"usage":{"total_tokens":10}}
-{"choices":[{"index":0,"message":{"role":"assistant","content":"done","reasoning_content":"","tool_calls":[]}}],"usage":{"total_tokens":10}}
+{"choices":[{"index":0,"message":{"role":"assistant","content":"fertig","reasoning_content":"","tool_calls":[]}}],"usage":{"total_tokens":10}}
 EOF
 echo "test" > "$TMP/readme.txt"
 _mock_file="$MOCK"
@@ -92,41 +97,29 @@ _mock_file=""
 
 if [[ -f "$SPAN_FILE" ]]; then
   name=$(jq -rs '.[0].name' "$SPAN_FILE" 2>/dev/null)
-  if [[ "$name" == "read_file" ]]; then
-    printf '  [PASS] dispatch_tool writes a span for read_file\n'
-  else
-    printf '  [FAIL] dispatch_tool: unexpected tool name "%s"\n' "$name" >&2
-    FAIL=1
-  fi
-  # ok should be true (the file exists)
+  assert "dispatch: span for read_file" "read_file" "$name"
   ok=$(jq -rs '.[0].ok' "$SPAN_FILE" 2>/dev/null)
-  if [[ "$ok" == "true" ]]; then
-    printf '  [PASS] dispatch_tool: ok=true (success)\n'
-  else
-    printf '  [FAIL] dispatch_tool: ok expected "true", got "%s"\n' "$ok" >&2
-    FAIL=1
-  fi
-  # duration_ms must be a number
+  assert "dispatch: ok=true (success)" "true" "$ok"
   dur=$(jq -rs '.[0].duration_ms' "$SPAN_FILE" 2>/dev/null)
   if [[ "$dur" =~ ^[0-9]+$ ]]; then
-    printf '  [PASS] dispatch_tool: duration_ms is a number (%s)\n' "$dur"
+    printf '  [PASS] dispatch: duration_ms is a number (%s)\n' "$dur"
   else
-    printf '  [FAIL] dispatch_tool: duration_ms not a number: %q\n' "$dur" >&2
+    printf '  [FAIL] dispatch: duration_ms not a number: %q\n' "$dur" >&2
     FAIL=1
   fi
 else
-  printf '  [FAIL] dispatch_tool: no span log written\n' >&2
+  printf '  [FAIL] dispatch: no span log\n' >&2
   FAIL=1
 fi
 
-# ============================================================================
-# 3. dispatch_tool: the error path writes ok=false
-# ============================================================================
-printf '  [INFO] dispatch_tool error path\n'
+# ===========================================================================
+# 3. dispatch_tool: the error path logs ok=false
+# ===========================================================================
+printf '  [INFO] dispatch_tool (error path)\n'
 rm -f "$SPAN_FILE"
 cat > "$MOCK" <<EOF
 {"choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"","tool_calls":[{"id":"tc2","type":"tool_call","function":{"name":"read_file","arguments":"{\"path\":\"$TMP/nonexistent.txt\"}"}}]}}],"usage":{"total_tokens":10}}
-{"choices":[{"index":0,"message":{"role":"assistant","content":"done","reasoning_content":"","tool_calls":[]}}],"usage":{"total_tokens":10}}
+{"choices":[{"index":0,"message":{"role":"assistant","content":"fertig","reasoning_content":"","tool_calls":[]}}],"usage":{"total_tokens":10}}
 EOF
 _mock_file="$MOCK"
 run_turn "Test missing" < /dev/null > /dev/null 2>&1
@@ -134,70 +127,40 @@ _mock_file=""
 
 if [[ -f "$SPAN_FILE" ]]; then
   ok=$(jq -rs '.[0].ok' "$SPAN_FILE" 2>/dev/null)
-  if [[ "$ok" == "false" ]]; then
-    printf '  [PASS] dispatch_tool: ok=false (failure)\n'
-  else
-    printf '  [FAIL] dispatch_tool error path: ok expected "false", got "%s"\n' "$ok" >&2
-    FAIL=1
-  fi
+  assert "dispatch: ok=false (failure)" "false" "$ok"
 else
-  printf '  [FAIL] dispatch_tool error path: no span log\n' >&2
+  printf '  [FAIL] dispatch (error path): no span log\n' >&2
   FAIL=1
 fi
 
-# ============================================================================
-# 4. cmd_eval: report from a valid span log
-# ============================================================================
+# ===========================================================================
+# 4. cmd_eval: report from a valid span file
+# ===========================================================================
 printf '  [INFO] cmd_eval\n'
 rm -f "$SPAN_FILE"
 cat > "$SPAN_FILE" <<'EOF'
-{"ts":"2026-09-30T10:00:00+00:00","name":"read_file","args_hash":"abc123","duration_ms":15,"ok":true}
-{"ts":"2026-09-30T10:00:01+00:00","name":"bash","args_hash":"def456","duration_ms":120,"ok":true}
-{"ts":"2026-09-30T10:00:02+00:00","name":"bash","args_hash":"ghi789","duration_ms":50,"ok":false}
-{"ts":"2026-09-30T10:00:03+00:00","name":"read_file","args_hash":"jkl012","duration_ms":10,"ok":true}
+{"ts":"2026-09-30T10:00:00+0200","name":"read_file","args_hash":"abc123","duration_ms":15,"ok":true}
+{"ts":"2026-09-30T10:00:01+0200","name":"bash","args_hash":"def456","duration_ms":120,"ok":true}
+{"ts":"2026-09-30T10:00:02+0200","name":"bash","args_hash":"ghi789","duration_ms":50,"ok":false}
+{"ts":"2026-09-30T10:00:03+0200","name":"read_file","args_hash":"jkl012","duration_ms":10,"ok":true}
 EOF
 
 out="$(cmd_eval "$SPAN_FILE" 2>&1)"
 rc=$?
-
-if (( rc == 0 )); then
-  printf '  [PASS] cmd_eval: rc=0\n'
-else
-  printf '  [FAIL] cmd_eval: rc=%d\n' "$rc" >&2
-  FAIL=1
-fi
-
-if [[ "$out" == *"Trace-level evaluation"* ]]; then
-  printf '  [PASS] cmd_eval: header present\n'
-else
-  printf '  [FAIL] cmd_eval: header missing\n' >&2
-  FAIL=1
-fi
-
-if [[ "$out" == *"FAILED: 1 of 4"* ]]; then
-  printf '  [PASS] cmd_eval: verdict correct (1 of 4 failed)\n'
-else
-  printf '  [FAIL] cmd_eval: verdict expected "FAILED: 1 of 4", got:\n  %q\n' "$out" >&2
-  FAIL=1
-fi
-
-if [[ "$out" == *"Per tool:"* ]]; then
-  printf '  [PASS] cmd_eval: per-tool section present\n'
-else
-  printf '  [FAIL] cmd_eval: per-tool section missing\n' >&2
-  FAIL=1
-fi
-
+assert "cmd_eval: rc" "0" "$rc"
+contains "cmd_eval: header" "Trace-level evaluation" "$out"
+contains "cmd_eval: verdict" "FAILED: 1 of 4" "$out"
+contains "cmd_eval: per-tool section" "Per tool:" "$out"
 if [[ "$out" == *"read_file:"* && "$out" == *"bash:"* ]]; then
-  printf '  [PASS] cmd_eval: both tools in the per-tool report\n'
+  printf '  [PASS] cmd_eval: both tools in the report\n'
 else
-  printf '  [FAIL] cmd_eval: tools missing from the per-tool report\n' >&2
+  printf '  [FAIL] cmd_eval: tools missing from the report\n' >&2
   FAIL=1
 fi
 
-# ============================================================================
+# ===========================================================================
 # 5. cmd_eval: empty file
-# ============================================================================
+# ===========================================================================
 printf '  [INFO] cmd_eval (empty file)\n'
 rm -f "$SPAN_FILE"
 touch "$SPAN_FILE"
@@ -210,9 +173,9 @@ else
   FAIL=1
 fi
 
-# ============================================================================
+# ===========================================================================
 # 6. cmd_eval: missing file
-# ============================================================================
+# ===========================================================================
 printf '  [INFO] cmd_eval (missing file)\n'
 out="$(cmd_eval "$TMP/nonexistent.jsonl" 2>&1)"
 rc=$?
@@ -223,31 +186,19 @@ else
   FAIL=1
 fi
 
-# ============================================================================
-# 7. lex --eval CLI flag
-# ============================================================================
-printf '  [INFO] lex --eval CLI\n'
+# ===========================================================================
+# 7. CLI: lex --eval
+# ===========================================================================
+printf '  [INFO] lex --eval (CLI)\n'
 out="$(bash "$LEX_DIR/lex" --eval "$SPAN_FILE" 2>&1)"
 rc=$?
-if (( rc == 0 )); then
-  printf '  [PASS] lex --eval: rc=0\n'
-else
-  printf '  [FAIL] lex --eval: rc=%d\n' "$rc" >&2
-  FAIL=1
-fi
-
-if [[ "$out" == *"Trace-level evaluation"* ]]; then
-  printf '  [PASS] lex --eval: header\n'
-else
-  printf '  [FAIL] lex --eval: header missing\n' >&2
-  FAIL=1
-fi
+assert "lex --eval: rc" "0" "$rc"
+contains "lex --eval: header" "Trace-level evaluation" "$out"
 
 echo ""
 if (( FAIL > 0 )); then
-  printf 'FAILED: %d test(s) failed\n' "$FAIL" >&2
+  printf 'FAILED: %s test(s) in test_eval.sh\n' "$FAIL" >&2
   exit 1
-else
-  echo "ALL TESTS GREEN. ✓"
-  exit 0
 fi
+echo "test_eval.sh green. ✓"
+exit 0

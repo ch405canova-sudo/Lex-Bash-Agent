@@ -14,6 +14,9 @@
 #
 #   script file: one JSON response per line (OpenAI format). One line is
 #   used per POST request. If empty → DEFAULT response.
+#   .sse ending: the file is delivered as a WHOLE SSE stream (not consumed)
+#   — that is how test_sse.sh tests the streaming path of call_api().
+#   First line „STATUS:500|{json}": own HTTP status code.
 #
 # IMPORTANT (contracts that were broken):
 #   - `ncat --listen` accepts EXACTLY ONE connection WITHOUT `-k` and
@@ -44,7 +47,7 @@ if [[ -z "${SCRIPT_FILE:-}" ]]; then
 fi
 [[ -f "$SCRIPT_FILE" ]] || { echo "Error: script file '$SCRIPT_FILE' not found." >&2; exit 1; }
 
-DEFAULT_RESP='{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
+DEFAULT_RESP='{"choices":[{"index":0,"message":{"role":"assistant","content":"Taugt.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
 
 BASE_DIR="$(dirname "$SCRIPT_FILE")"
 HANDLER="$BASE_DIR/.fake_openai_handler.$PORT.sh"
@@ -92,26 +95,45 @@ fi
 if (( expect_100 )); then
   printf 'HTTP/1.1 100 Continue\r\n\r\n'
 fi
-# read the body completely, otherwise RST on close (curl: rc 52)
+# read the body completely, otherwise RST on close (curl: rc 52).
+# FAKE_BODY_LOG (optional): also write the request body — test_sse.sh checks
+# with it whether call_api sends stream_options/include_usage.
 if (( cl > 0 )); then
-  head -c "\$cl" >/dev/null 2>&1 || true
+  if [[ -n "\${FAKE_BODY_LOG:-}" ]]; then
+    head -c "\$cl" > "\$FAKE_BODY_LOG" 2>/dev/null || true
+  else
+    head -c "\$cl" >/dev/null 2>&1 || true
+  fi
 fi
 
-# take the response line under flock (parallel requests)
+# take the response line under flock (parallel requests).
+# *.sse files are delivered COMPLETELY as a stream — one line per
+# event would not work, head -n1 would cut at the line break.
 exec 200>"\$LOCK_FILE"
 flock 200
 body=""
-if [[ -f "\$SCRIPT_FILE" ]] && [[ -s "\$SCRIPT_FILE" ]]; then
+ctype="application/json"
+status="200 OK"
+if [[ "\$SCRIPT_FILE" == *.sse ]]; then
+  body="\$(cat "\$SCRIPT_FILE" 2>/dev/null)"
+  ctype="text/event-stream"
+elif [[ -f "\$SCRIPT_FILE" ]] && [[ -s "\$SCRIPT_FILE" ]]; then
   body="\$(head -n1 "\$SCRIPT_FILE" 2>/dev/null)"
   tail -n +2 "\$SCRIPT_FILE" > "\${SCRIPT_FILE}.tmp" 2>/dev/null && mv "\${SCRIPT_FILE}.tmp" "\$SCRIPT_FILE" 2>/dev/null
 fi
 flock -u 200
 [[ -z "\${body:-}" ]] && body="\$DEFAULT"
+# STATUS:500|{json} → own HTTP status (covers the rc-guard of call_api)
+if [[ "\$body" == STATUS:* ]]; then
+  IFS='|' read -r _st _bd <<< "\$body"
+  status="\${_st#STATUS:}"
+  body="\$_bd"
+fi
 # Content-Length in BYTES: \${#body} counts characters (a UTF-8 umlaut → 1 line
 # would be 1 byte too short → curl cuts the JSON → jq error).
 len=\$(printf '%s' "\$body" | wc -c)
 len=\${len// /}
-printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "\$len" "\$body"
+printf 'HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "\$status" "\$ctype" "\$len" "\$body"
 HANDLER_EOF
 chmod +x "$HANDLER"
 

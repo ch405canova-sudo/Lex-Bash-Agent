@@ -24,7 +24,7 @@ lex                   # interactive REPL
 | `timeout`, `realpath`, `readlink -f` | time limit / path normalisation | **fallbacks built in** (`command -v` guard) |
 | ncat | fake server used by the tests | only for `test_http.sh` |
 | shellcheck | lint | only for CI / development |
-| python3 | fake web server (HTML and search fixtures) in `test_features.sh` | only for tests |
+| python3 | fake web server (HTML and search fixtures) in `test_features.sh`, JSON helper in `test_proxy.sh` | only for tests |
 | node (v20) + MCP servers | `web_fetch`, `context7` | only for those two tools — without them you get a clear error message |
 
 ## Quick start
@@ -36,11 +36,26 @@ lex                   # interactive REPL (symlinked to ~/.local/bin/lex, no alia
 ./lex                 # the same via the full path
 ./lex --oneshot       # one prompt from stdin, answer to stdout
 ./lex --status        # config and runtime status
+./lex --eval          # trace-level report from the span log (spans.jsonl)
 ./lex --approve       # REPL, every bash run is confirmed first (needs a TTY)
 ./lex --install       # create ~/.lex/ (log/, sessions/, mem/, …)
+./lex --version       # show version
+./lex --help          # modes, slash commands, ENV list (same as /help)
 ```
 
-REPL slash commands: `/status`, `/plan`, `/help`.
+REPL slash commands — exactly as listed by `lex --help`:
+
+| Command | Effect |
+|---|---|
+| `/status` | same as `--status` |
+| `/server` | server/port status |
+| `/compact` | compress context now (keep summary + tail) |
+| `/plan` | show the current plan (todo list) |
+| `/lexpen` | set system prompt to the Lex persona (senior-engineer style) |
+| `/autosudo` | automatically answer y/N approvals in the sudo gate (`on\|off\|status`) |
+| `/lex` | back to the original prompt |
+| `/help` | this help |
+| `/exit`, `/quit` | leave the REPL (also Ctrl-D) |
 
 ## Tools (17)
 
@@ -109,6 +124,11 @@ lex builds exactly one system prompt per session, in this order:
 7. **Wiki state** — `index.md`, the last 40 lines of `log.md` and a
    `mem_search` result are appended, so the agent starts every session
    with its own memory in context
+
+The prompt is not cast in stone: `/lexpen` swaps the system prompt for
+the Lex persona (senior-engineer style) and `/lex` restores the original
+one — `--status` shows the active mode (`prompt : lexpen …` or
+`standard`).
 
 The whole prompt is visible at any time:
 
@@ -217,8 +237,10 @@ dependencies:
 - `⏳ thinking …` spinner while generating (starts only after 250 ms)
 - `⚙ tool args` for running tools: name **bold cyan**, arguments grey;
   `↳ tool` (cyan-dim) with an indented return value truncated to 8 lines
-- `⏱ 3.2s · turn 2/50 · tokens 1409 prompt + 69 completion` and the
-  separator appear **before** the answer — the answer is the last thing on
+- `⏱ 3.2s · turn 2/50 · tokens 1409/262144 (1%) prompt + 69 completion` —
+  with a context limit the HUD shows the fill level as `X/Y (Z%)` (without
+  a limit the plain `tokens N` form stays, missing usage shows `?`) — and the
+  line appears **before** the answer, so the answer is the last thing on
   screen (otherwise it visually drowns)
 - final answer with markdown lighting: H1 **bold + underlined** (instead
   of "white" — invisible on a light terminal), H2 **bold cyan**, H3 cyan,
@@ -233,6 +255,42 @@ https://no-color.org), `LEX_TRACE=1` shows the trace without a terminal.
 Only the answer itself goes to **stdout** — everything else runs on
 **stderr** and only with a terminal (or `LEX_TRACE=1`). Pipes, files and
 tests therefore stay raw and unchanged.
+
+## Context compaction, spill & guards
+
+- **Context compaction** (automatic, plus `/compact` as a force): as soon
+  as the estimated context — `wc -c` divided by 3, i.e. roughly 3 bytes
+  per token, deliberately conservative — reaches `LEX_CTX_LIMIT −
+  max(LEX_MAX_TOKENS, LEX_COMPACT_BUFFER)` (defaults 262144 − 20000 =
+  242144), the head of the history is replaced by a summary the model
+  writes itself into a fixed Markdown template (`## Goal`,
+  `## Key details`, `## Status` with Done / In progress / Blocked,
+  `## Next step`, `## Relevant files`), keeping the newest units as the
+  tail (`LEX_COMPACT_KEEP`, default 15000). Pairing gates keep assistant
+  tool calls and their results together, the prior summary is merged
+  instead of stacked, and every error path leaves the context
+  **byte-identical** (fail-safe: nothing is compacted if the summary
+  fails). `LEX_COMPACT=off` switches it off; `--status` prints a
+  `compact` line plus a `ctx` line with the fill level, and each
+  compaction is logged and recorded in the session.
+- **Spill instead of silent truncation**: a tool result larger than
+  `LEX_TOOL_MAX_OUTPUT` (default 50000) is not cut off — the full output
+  is stored under `~/.lex/toolout/` (the 100 newest spills are kept) and
+  the context gets the head plus the path and a hint to reload it with
+  `read_file`.
+- **Repetition-loop detection**: `_rep_detect` looks only at the visible
+  answer (code blocks and table rows masked, reasoning and tool
+  arguments out of scope) and finds a trailing run (`A1`), an identical
+  sentence repeated ≥ 4× (`A2`) or a duplicate 4-gram share ≥ 0.35 from
+  70 4-grams (`A3`). The guard answers with a **budget**: soft nudge →
+  hard nudge → a truncated render of the first 2000 characters. The
+  budget is the shared nudge counter `LEX_MAX_NUDGES` (default 4), so
+  repetition and empty answers cannot spin forever; every step is logged
+  and written to the session as `{type:repetition}`.
+- **`/autosudo` (on|off|status, `LEX_AUTOSUDO=1`)** — auto-approves the
+  `y/N` question of the sudo gate so an unattended run does not stall at
+  it; password prompts and other TTY questions stay manual (mechanics
+  under Security).
 
 ## MCP & web search
 
@@ -271,7 +329,9 @@ use that so **no test ever goes to the network**).
   log). If the sudo ticket is already valid, `y/N` is asked instead.
   Without a controlling TTY there is no sudo run. `LEX_SUDO=0` blocks
   sudo completely, `LEX_SUDO_APPROVE=0` drops the `y/N` question for a
-  valid ticket.
+  valid ticket. `/autosudo on` (or `LEX_AUTOSUDO=1`) answers that same
+  `y/N` approval live, without a restart — the mode for unattended runs;
+  password prompts are never answered automatically.
 - **Opt-in** approval gate for **all** bash runs: only with `--approve`
   or `LEX_APPROVE=1` and a controlling TTY is every run confirmed —
   without the flag the agent runs prompt-free (tests stay deterministic).
@@ -285,22 +345,39 @@ use that so **no test ever goes to the network**).
 
 `defaults → ~/.lex/settings.json → .lex/settings.json (CWD) → ENV`
 
-Important ENV variables: `LEX_API_URL`, `LEX_MODEL`, `LEX_MAX_TOKENS`,
+Important ENV variables — the exact list from `usage()` / `lex --help`:
+`LEX_API_URL`, `LEX_API_KEY`, `LEX_MODEL`, `LEX_MAX_TOKENS`,
 `LEX_REASONING_BUDGET`, `LEX_TEMPERATURE`, `LEX_MAX_TURNS`,
-`LEX_TOOL_TIMEOUT`, `LEX_TOOL_MAX_OUTPUT`, `LEX_LOG_DIR`,
+`LEX_TOOL_TIMEOUT`, `LEX_TOOL_MAX_OUTPUT`, `LEX_CTX_LIMIT`,
+`LEX_COMPACT`, `LEX_COMPACT_KEEP`, `LEX_COMPACT_BUFFER`, `LEX_LOG_DIR`,
 `LEX_MOCK`, `LEX_MOCK_FILE`, `LEX_APPROVE`, `LEX_SUDO`, `LEX_SUDO_APPROVE`,
-`LEX_SESSION`, `LEX_MEM_DIR`, `LEX_WIKI_DIR`, `LEX_HTOOLS_DIR`,
-`LEX_TRACE` (force trace/HUD/spinner on stderr), `LEX_SHOW_REASONING`
-(0 = no thinking block), `LEX_REASONING_MAX` (truncation),
-`LEX_MCP`/`LEX_MCP_TIMEOUT` (MCP on/off and time limit),
+`LEX_AUTOSUDO`, `LEX_SESSION`, `LEX_MEM_DIR`, `LEX_WIKI_DIR`,
+`LEX_HTOOLS_DIR`, `LEX_TRACE` (force trace/HUD/spinner on stderr),
+`LEX_SHOW_REASONING` (0 = no thinking block), `LEX_REASONING_MAX`
+(truncation), `LEX_MCP`/`LEX_MCP_TIMEOUT` (MCP on/off and time limit),
 `LEX_SEARCH_URL`/`LEX_SEARCH_TIMEOUT` (search endpoint and time limit).
+
+The compaction block in detail: `LEX_CTX_LIMIT` is the context size used
+for threshold and HUD (default 262144), `LEX_COMPACT` is `on|off`
+(default `on`), `LEX_COMPACT_KEEP` sizes the tail kept after a compaction
+(default 15000, budgeted as `keep × 4` bytes) and `LEX_COMPACT_BUFFER`
+the reserve below the limit that stays free for the answer (default
+20000) — the threshold is `LEX_CTX_LIMIT − max(LEX_MAX_TOKENS,
+LEX_COMPACT_BUFFER)`.
 
 ## Tests
 
 ```bash
-./test/run_all.sh          # 8 runners / 530 checks, exit 0 only when all are green
+./test/run_all.sh          # 13 runners / 712 checks (712 PASS + 1 SKIP), exit 0 only when all are green
 shellcheck -S warning lex ai.sh install.sh test/*.sh tools/*.sh
 ```
+
+13 runners over 11 test files: the first two are gates — `testboden`
+(every runner named in `run_all.sh` exists and is executable, no test
+file deleted against HEAD, no present test file left unwired) and
+`syntax` (`bash -n` on `lex` and `tools/llama-proxy.sh`) — followed by
+`input`, `tools`, `loop`, `http`, `features`, `proxy`, `sse`, `eval`,
+`limits`, `compaction`, `repetition`.
 
 The tests run **without network and without a server** — either with
 `LEX_MOCK=done` (static), `LEX_MOCK_FILE` (sequence, source file left
@@ -354,12 +431,12 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 2992 lines, 17 tools
+lex              the agent — one file, 4020 lines, 17 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)
 tools/           llama-proxy.sh (debug proxy to the llama-server)
-test/            run_all.sh + 8 test files + fake_server.sh + fake_mcp.sh
+test/            run_all.sh + 11 test files + fake_server.sh + fake_mcp.sh
 .github/         CI (shellcheck + run_all.sh + installer smoke test)
 ```
 

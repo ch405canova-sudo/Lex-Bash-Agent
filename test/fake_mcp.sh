@@ -43,48 +43,48 @@ while IFS= read -r line; do
       args="$(jq -c '.params.arguments // {}' <<< "$line")"
       case "$tool" in
         fetch)
-          t="Excerpt: $(jq -r '.url // ""' <<< "$args") (max $(jq -r '.max_length // 0' <<< "$args"))"
+          t="Auszug: $(jq -r '.url // ""' <<< "$args") (max $(jq -r '.max_length // 0' <<< "$args"))"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         resolve-library-id)
           t='- Title: Fake
 - Context7-compatible library ID: /fake/lib
-- Description: Test library for lex
+- Description: Testbibliothek für lex
 - Code Snippets: 7'
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         query-docs)
-          t="DOCUMENTATION: $(jq -r '.query // ""' <<< "$args") (source: $(jq -r '.libraryId // ""' <<< "$args"))"
+          t="DOKUMENTATION: $(jq -r '.query // ""' <<< "$args") (Quelle: $(jq -r '.libraryId // ""' <<< "$args"))"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_navigate)
-          t="Navigated to: $(jq -r '.url // ""' <<< "$args")"
+          t="Gefahren nach: $(jq -r '.url // ""' <<< "$args")"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_snapshot)
-          t='Snapshot (accessibility tree):
-- page "Home" [ref=s1e42]
-- heading "Welcome" [ref=s1e43]
-- button "Submit" [ref=s1e44]'
+          t='Snapshot (Accessibility-Baum):
+- page "Startseite" [ref=s1e42]
+- heading "Willkommen" [ref=s1e43]
+- button "Absenden" [ref=s1e44]'
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_click)
-          t="Clicked: ref=$(jq -r '.ref // ""' <<< "$args") on \"$(jq -r '.element // ""' <<< "$args")\""
+          t="Geklickt: ref=$(jq -r '.ref // ""' <<< "$args") auf \"$(jq -r '.element // ""' <<< "$args")\""
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_type)
-          t="Typed to ref=$(jq -r '.ref // ""' <<< "$args"): $(jq -r '.text // ""' <<< "$args")"
+          t="Getippt nach ref=$(jq -r '.ref // ""' <<< "$args"): $(jq -r '.text // ""' <<< "$args")"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_wait_for)
-          t="Waited: $(jq -r '.time // 1' <<< "$args")s"
+          t="Gewartet: $(jq -r '.time // 1' <<< "$args")s"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
@@ -96,7 +96,7 @@ while IFS= read -r line; do
           ;;
         boom)
           jq -cn --arg i "$id" \
-            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:"intentionally broken"}], isError:true}}'
+            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:"absichtlich kaputt"}], isError:true}}'
           ;;
         hang)
           exec sleep 30
@@ -106,14 +106,14 @@ while IFS= read -r line; do
           ;;
         *)
           jq -cn --arg i "$id" \
-            '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unknown tool"}}'
+            '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unbekanntes Tool"}}'
           ;;
       esac
       ;;
     *)
       if [[ -n "$id" ]]; then
         jq -cn --arg i "$id" \
-          '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unknown method"}}'
+          '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unbekannte Methode"}}'
       fi
       ;;
   esac
