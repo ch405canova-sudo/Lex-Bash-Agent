@@ -302,8 +302,36 @@ per call:
 | `defuddle` | `web_fetch` | `node ~/.mcp/node_modules/defuddle-stdio-mcp/index.js` |
 | `context7` | `context7` | `~/.local/bin/context7-mcp` |
 
-The locations live in **`~/.lex/mcp.json`** (without the file the
-defaults above apply); `LEX_MCP=0` switches both tools off and
+Three more servers are part of the **default config** in `_mcp_config()`
+(they are generic, not bundled — reachable through `mcp(server, …)`):
+
+| Server | What it gives lex |
+|---|---|
+| `playwright` | real browser control (`browser` tool: navigate → snapshot → click/type by ref) |
+| `desktop` | GUI without a CLI (`computer-use-linux`: screen state, mouse, keyboard) |
+| `postgres` | **SQL over MCP** — see below |
+
+**Postgres is wired in.** lex ships with a default `postgres` entry in
+`_mcp_config()`:
+
+```json
+"postgres": { "command": "~/.lex/pg/dbhub.sh",
+              "args": ["--dsn", "postgres://lex@127.0.0.1:5432/lex?sslmode=disable"] }
+```
+
+- MCP server: **`@bytebase/dbhub`** (stdio, tools `execute_sql` +
+  `search_objects`, read/write), started by the wrapper `~/.lex/pg/dbhub.sh`
+- Database: your **own `lex` database** on `127.0.0.1:5432` — the reference
+  setup runs PostgreSQL **user-space under `~/.lex/pg`** (no sudo, own
+  socket, trust auth on localhost, start/stop via `~/.lex/pg/start.sh`)
+- The system prompt enforces the workflow: *database tasks → first
+  `mcp(postgres, '__tools')` for the real tool list, then SQL — and only
+  ever the own `lex` database*
+- No Postgres running? The call fails with a clear error; everything else
+  is unaffected
+
+The locations for all servers live in **`~/.lex/mcp.json`** (without the
+file the defaults above apply); `LEX_MCP=0` switches the MCP tools off and
 `LEX_MCP_TIMEOUT` (seconds, default 60) bounds every call.
 The web search (`web_search`) does not use MCP — it goes straight to
 DuckDuckGo HTML, `LEX_SEARCH_URL` allows a different endpoint (the tests
