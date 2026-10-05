@@ -3813,7 +3813,7 @@ LEXPEN_EOF
       # file contains those placeholders (otherwise literals end up in the prompt).
       content="${content//\$\{_wiki_dir\}/$_wiki_dir}"
       content="${content//\$\{_htools_dir\}/$_htools_dir}"
-      _system_prompt="$content${_prompt_ops}"
+      _system_prompt="$content"$'\n'"${_prompt_ops}"
       _lexpen_active="1"
       ;;
     *)

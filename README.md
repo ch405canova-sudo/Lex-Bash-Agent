@@ -396,7 +396,7 @@ LEX_COMPACT_BUFFER)`.
 ## Tests
 
 ```bash
-./test/run_all.sh          # 13 runners / 725 checks (725 PASS + 1 SKIP), exit 0 only when all are green
+./test/run_all.sh          # 13 runners / 726 checks (726 PASS + 1 SKIP), exit 0 only when all are green
 shellcheck -S warning lex ai.sh install.sh test/*.sh tools/*.sh
 ```
 

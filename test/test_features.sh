@@ -1411,6 +1411,8 @@ contains "lexpen (status message)" "Lex persona" "$out"
 contains "lexpen (ops: verification rule)" "You verify with tools, not in your head" "$sysc"
 contains "lexpen (ops: research rule)" "Never guess, look it up" "$sysc"
 contains "lexpen (ops: tool list)" "You have 17 tools" "$sysc"
+assert "lexpen (ops newline-separated)" "1" \
+  "$([[ "$sysc" == *$'\n- **You verify with tools'* ]] && echo 1 || echo 0)"
 assert "lexpen (style marker replaced)" "0" \
   "$([[ "$sysc" == *"ALWAYS in English"* ]] && echo 1 || echo 0)"
 
