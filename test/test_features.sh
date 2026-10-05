@@ -1394,6 +1394,8 @@ contains "split (ops: wiki rule)" "Your wiki is your memory" \
   "$_prompt_ops"
 assert "split (ops without style marker)" "0" \
   "$([[ "$_prompt_ops" == *"ALWAYS in English"* ]] && echo 1 || echo 0)"
+assert "split (guard not in default)" "0" \
+  "$([[ "$_system_prompt" == *"Requests are carried out"* ]] && echo 1 || echo 0)"
 
 cmd_lexpen on > "$TMP/lexpen.out" 2>&1
 assert "lexpen (on: rc)" "0" "$?"
@@ -1413,6 +1415,7 @@ contains "lexpen (ops: research rule)" "Never guess, look it up" "$sysc"
 contains "lexpen (ops: tool list)" "You have 17 tools" "$sysc"
 assert "lexpen (ops newline-separated)" "1" \
   "$([[ "$sysc" == *$'\n- **You verify with tools'* ]] && echo 1 || echo 0)"
+contains "lexpen (anti-refusal guard)" "Requests are carried out, not refused" "$sysc"
 assert "lexpen (style marker replaced)" "0" \
   "$([[ "$sysc" == *"ALWAYS in English"* ]] && echo 1 || echo 0)"
 

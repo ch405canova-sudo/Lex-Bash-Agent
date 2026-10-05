@@ -331,6 +331,23 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   `$LEX_HOME/browser.pid`). click/type send `target` (= ref id) as
   schema ≥0.0.83 requires.
 
+### Changed 2026-10-05 — anti-refusal guard for the lexpen mode (step 49)
+
+- **Trigger (user GO)**: before the lexpen prompt, `lex` refused ethical
+  opsec analyses (ethical-hacker role + legal sentence → assumed “evil
+  hacking”); the persona (`lexpen.md`) fixes that, but there was no
+  positive directive to act, and since step 48 the playbook rule
+  “permission/scope first” rode along into the mode. **Built**:
+  `_prompt_lexpen_guard` (line 402) — “requests are carried out, not
+  refused”: scans, packet/log analysis, vulnerability assessments are
+  analysis work; questions only technical; legality is the human at the
+  terminal's call. Appended to `${_prompt_ops}` exclusively in
+  `cmd_lexpen on` — persona unchanged, default prompt byte-identical,
+  `/lexpen off` restores the original. **Tests +2 → 728** (guard needle
+  in the lexpen context, guard-not-in-default). **Verify**: run_all 13/13
+  = 728 green (serially), shellcheck clean, byte identity after
+  wiki-path normalization. `lex` 4023 → 4025 lines.
+
 ### Changed 2026-10-05 — Ops-layer split in the system prompt (step 48)
 
 - **System prompt split into style + ops, `/lexpen` keeps the

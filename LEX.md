@@ -15,7 +15,7 @@ less LEX.md                     # this document
 
 # Does the script still run at all?
 bash -n lex                     # syntax
-bash test/run_all.sh            # 13 runners, 726 checks — green as of 2026-10-05 (v0.1.0 + wiki steps 1–25 + full audit + streaming fix + observability backport + testboden gates + truncation→spill + `/exit` & token HUD + blue-team working framework + context compaction & context HUD + prompt mode `/lexpen` + repetition guard)
+bash test/run_all.sh            # 13 runners, 728 checks — green as of 2026-10-05 (v0.1.0 + wiki steps 1–25 + full audit + streaming fix + observability backport + testboden gates + truncation→spill + `/exit` & token HUD + blue-team working framework + context compaction & context HUD + prompt mode `/lexpen` + repetition guard)
 
 # Quick test WITHOUT a server
 echo "Say hello" | LEX_MOCK=done ./lex --oneshot   # → "Works."
@@ -123,7 +123,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 
 | | |
 |---|---|
-| **Binary** | `lex` (one script, 4023 lines) |
+| **Binary** | `lex` (one script, 4025 lines) |
 | **Backend** | local llama-server, OpenAI protocol, `http://127.0.0.1:8080/v1/chat/completions` |
 | **Model** | `Ternary-Bonsai-2-27B-PQ2_0.gguf` (alias=`--alias` possible) |
 | **Language** | English-first — system prompt, docs, answers |
@@ -187,7 +187,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 - **Session JSONL** (append-only, one message per line; `reasoning_content` is persisted but **not** written into the model context)
 - **Memory** under `~/.lex/mem/` (Markdown + YAML frontmatter, types `memory|fact|preference|note`)
 - **Security**: hard deny list in `tool_bash` (always on) + opt-in `--approve` (TTY only) + **sudo gate** (§6 #13: exactly one prompt, password straight to sudo)
-- **Tests**: 11 test files + `fake_server.sh` + `fake_mcp.sh`, **726 checks** (713 individual + 13 runner marks), `bash test/run_all.sh` → **PASS: 13  FAIL: 0  TOTAL: 13** (exit 0, live counted 2026-10-05) — the first runner is **`testboden`** (§6 "Prevention")
+- **Tests**: 11 test files + `fake_server.sh` + `fake_mcp.sh`, **728 checks** (715 individual + 13 runner marks), `bash test/run_all.sh` → **PASS: 13  FAIL: 0  TOTAL: 13** (exit 0, live counted 2026-10-05) — the first runner is **`testboden`** (§6 "Prevention")
 - **Observability**: `span_log()` writes one line per `dispatch_tool` call to `$_log_dir/spans.jsonl` (default `~/.lex/log/spans.jsonl`; `ts`, `name`, `args_hash`, `duration_ms`, `ok` — jq JSONL, TSV without jq), plus `cmd_eval` = `lex --eval [file]` → evaluation (verdict, per-tool section, last 10 spans)
 - **Context compaction + context HUD** (step 42): auto-trigger before `append_message user` as soon as the `wc -c/3` estimate (live measurement 3.30 B/token) ≥ `ctx − max(max_tokens, buffer)` (default 242144 → inert), `/compact` as force, jq pairing gate + G0–G8 (fail-safe: with an empty summary `_messages` stays byte-identical), marker `<!--lex-compact-->` in slot 1, session record `{type:compaction}`; HUD `tokens X/Y (Z%) prompt + …`, `/status` with `compact`/`ctx` block; config `ctx_limit`/`compact`/`compact_keep`/`compact_buffer` (tier 2 + ENV)
 - **Prompt mode `/lexpen` → Lex persona** (step 43): slash `/lexpen` swaps slot 0 of the context for the senior-engineer persona from `~/.lex/prompts/lexpen.md` (created on first call, XP4→Lex, freely editable afterwards), `/lex` or `/lexpen off` back to the original — history and wiki state stay intact (`_wiki_ex()`), session record `{type:prompt_mode}`, prompt marker `lex*>`, `prompt` line in `/status`, `usage()` names both slashes; answers in the mode: **English** (prompt directive, addendum 2026-10-03), title block, "Chief", `✦ made by @Lex ✦`
@@ -201,7 +201,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 ### Tree (status 2026-10-01)
 ```
 <repo>/
-├── lex                        ✅ 4023 lines, shellcheck-clean
+├── lex                        ✅ 4025 lines, shellcheck-clean
 ├── LEX.md                     ✅ this document
 ├── README.md                  ✅
 ├── CHANGELOG.md               ✅
@@ -228,7 +228,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 ```
 
 **Verified 2026-10-03**: `bash test/run_all.sh` → **PASS: 13  FAIL: 0  TOTAL: 13**
-(726 checks green, exit 0) · `shellcheck -S warning lex test/*.sh tools/*.sh` → 0.
+(728 checks green, exit 0) · `shellcheck -S warning lex test/*.sh tools/*.sh` → 0.
 
 ---
 
@@ -259,7 +259,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 
 ---
 
-## 5. Architecture of the script (`lex`, 4023 lines, status 2026-10-05)
+## 5. Architecture of the script (`lex`, 4025 lines, status 2026-10-05)
 
 | Function | Line | Task |
 |---|---|---|
@@ -269,7 +269,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 | `load_config()` | 211 | 4-tier: defaults → `~/.lex/settings.json` → `.lex/settings.json` (CWD) → ENV (incl. `LEX_APPROVE/LEX_SESSION/LEX_MEM_DIR`, **`LEX_CTX_LIMIT/LEX_COMPACT/LEX_COMPACT_KEEP/LEX_COMPACT_BUFFER` since step 42**) **+ numeric validation** (`_int_or` + on/off) |
 | `log()` | 281 | append-only to `$_log_dir/lex.log` |
 | `_ms_now()` / `span_log()` | 294 / 306 | **observability**: millisecond clock (`date +%s%N`, otherwise whole seconds) and append-only span writer to `$_log_dir/spans.jsonl` (`ts`, `name`, `args_hash` via `cksum`, `duration_ms`, `ok`; jq JSONL, TSV without jq) |
-| `_prompt_style` / `_prompt_ops` / `_system_prompt` | 327 / 354 / 402 | English-first **incl. the personality block (step 7)** + **"working framework" (step 40)**: fixed scope (own systems/lab/CTF, blue team = core business), technical terms as working vocabulary, scope question instead of blanket refusal — always English, brief, no guessing, capture errors, wiki as memory — plus **17 tools**, wiki conventions and planning discipline; **anti-doubt (step 15)**: decide firmly, verify via tools instead of introspection, no doubt loops. **Step 48 — ops-layer split**: `_prompt_style` = identity/role/working framework/style up to "Think decisively" (lines 327–352), `_prompt_ops` = verify-with-tools / never-guess / errors-are-material bullets + "For humans at a terminal" + the 17-tool list + wiki structure + rules (354–402), `_system_prompt="${_prompt_style}${_prompt_ops}"` **byte-identical** to the original (sha256 `b5578469…`, 13165 B); `/lexpen` appends `${_prompt_ops}` to the persona → tool/research discipline stays active in the mode
+| `_prompt_style` / `_prompt_ops` / `_prompt_lexpen_guard` / `_system_prompt` | 327 / 354 / 402 / 404 | English-first **incl. the personality block (step 7)** + **"working framework" (step 40)**: fixed scope (own systems/lab/CTF, blue team = core business), technical terms as working vocabulary, scope question instead of blanket refusal — always English, brief, no guessing, capture errors, wiki as memory — plus **17 tools**, wiki conventions and planning discipline; **anti-doubt (step 15)**: decide firmly, verify via tools instead of introspection, no doubt loops. **Step 48 — ops-layer split**: `_prompt_style` = identity/role/working framework/style up to "Think decisively" (lines 327–352), `_prompt_ops` = verify-with-tools / never-guess / errors-are-material bullets + "For humans at a terminal" + the 17-tool list + wiki structure + rules (354–402), `_system_prompt="${_prompt_style}${_prompt_ops}"` **byte-identical** to the original (sha256 `b5578469…`, 13165 B); `/lexpen` appends `${_prompt_ops}` to the persona → tool/research discipline stays active in the mode; **step 49 — anti-refusal guard**: `_prompt_lexpen_guard` (line 402) is appended by `cmd_lexpen` to the ops layer only („requests are carried out, not refused“) — persona and default prompt unchanged
 | `session_init()` / `session_write()` | 443 / 460 | session id + header line, append-only JSONL |
 | `append_message_json()` / `append_message()` / `setup_messages()` | 468 / 506 / 560 | message into the context array **and** as a JSONL record (with optional `reasoning`), JSON array as a string — **file-based** (`--rawfile`/`--slurpfile`, step 38): no more `jq --arg` with content, therefore also no 100,000-B cap |
 | `_build_tools()` | 586 | OpenAI tool schemas (17 tools, `edit_file.all` as `boolean`); **`_tools_off`** (step 42) → immediate `[]` without a jq run (the compaction summary call needs no tools) |
@@ -306,7 +306,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 | `agent_loop()` | 3568 | REPL (`while [[ -t 0 ]]`), slash commands `/status`, `/server`, `/help`, `/plan`, **`/exit`/`/quit` → `break`** (since 2026-10-01: previously fell through to `run_turn` → cost a request and stayed open), **`/compact` → `_compact_run force`** (step 42), **`/lexpen`\|`/lex` → `cmd_lexpen`** (step 43, explicit patterns against the request trap), prompt via `_prompt()` |
 | `oneshot()` | 3627 | stdin → `run_turn` (also `/status`, `/server`, `/help`, `/plan`, `/exit`/`/quit` → rc 0 without a model call, **`/compact`**, **`/lexpen`\|`/lex`**) |
 | `install_lex()` | 3652 | create `~/.lex/` (`mem/`, `prompts/`, not `mem_net/`) + settings template |
-| `_wiki_ex()` / `cmd_lexpen()` | 547 / 3679 | **step 43 — prompt mode**: `_wiki_ex()` delivers the wiki state (index + `tail -40` log) jointly for `setup_messages` and mode switch; `cmd_lexpen [on\|off]` (+ `/lex`) swaps only slot 0 via jq (`role==system` gate, otherwise `setup_messages` fallback) — history stays, lazy-create `~/.lex/prompts/lexpen.md` (heredoc, XP4→Lex), `${_wiki_dir}`/`${_htools_dir}` expansion, `{type:prompt_mode}` record, status/prompt marker |
+| `_wiki_ex()` / `cmd_lexpen()` | 547 / 3681 | **step 43 — prompt mode**: `_wiki_ex()` delivers the wiki state (index + `tail -40` log) jointly for `setup_messages` and mode switch; `cmd_lexpen [on\|off]` (+ `/lex`) swaps only slot 0 via jq (`role==system` gate, otherwise `setup_messages` fallback) — history stays, lazy-create `~/.lex/prompts/lexpen.md` (heredoc, XP4→Lex), `${_wiki_dir}`/`${_htools_dir}` expansion, `{type:prompt_mode}` record, status/prompt marker |
 | `usage()` | 3859 | help incl. security note (`--eval [file]`, slash list `/status /server /plan /lexpen /lex /help /exit /compact`), **ENV section** `LEX_CTX_LIMIT LEX_COMPACT LEX_COMPACT_KEEP LEX_COMPACT_BUFFER` (step 42) |
 | `cmd_eval()` | 3917 | **evaluation of the spans**: header with span file, count + total duration (s), verdict (`FAILED: n of m tool calls failed` or `OK: n tool calls, 0 failures`), per-tool section (sum ms + errors per tool), last 10 spans; missing file → hint, rc 0 |
 | `main()` | 3953 | `--oneshot --approve --status --install --eval --version --help` (dispatch after `--status`, optional with file positional) |
@@ -690,6 +690,8 @@ Excluded as causes: OOM, dbus, screen lock, GPU, Wayland server, lex itself (las
 
 47. **REPL prompt loss (step 47, 2026-10-03, user report "after tasks only a blinking cursor, but input still works")**: two findings: (1) `agent_loop` skipped `_prompt` on empty input via `continue` — Enter clears the line, the prompt stayed gone until restart (the user associated it with task completion because he tested afterwards); (2) the spinner loop without a flag gate could keep going as an orphaned child. **Built**: `{ _spin_stop; _prompt; continue; }`, `_spin_stop` before every loop-end `_prompt`, flag gate `while [[ -f "$_spin_flag" ]]`. **Proof**: PTY test with `script` (2× Enter → ≥3 `lex>` in the transcript; 2 before) + kill snippet (child dead, flag gone) — **+3 in `test_input.sh` → 712 = 699+13, 13 runners green**. **SIDE-FINDING during the docs patch: `LEX.md` was half-duplicated in commit `2bdbd7d`** (§0–§7 twice, §9–§13 twice; base 756e10b was clean) → file re-created fresh from base 756e10b + entries 45/46 + today's numbers (811 lines, single § structure). §6/29–30 maintained, `wiki/errors/2026-10-03-repl-prompt-verschwindet.md` created. **VERIFY**: `bash -n` + shellcheck warning-clean + `run_all.sh` **13/13 green**; tlex restarted (`LEX_AUTOSUDO=1` + `/lexpen`). **Deliberate**: no commit (order missing)
 48. **Ops-layer split in the system prompt (step 48, 2026-10-05, user GO after a live finding)**: trigger — live session `20261005-022414-8604-14828` (proxychain/SOCKS5 task) returned **exactly 1 request, 0 tool calls** (20753 chars answer, 28965 chars reasoning, no `tool:` lines in `lex.log`, `spans.jsonl` empty since 2026-10-04): the "research" was a pure weights answer, never checked on the web. **Cause**: `cmd_lexpen` swaps slot 0 completely for the persona (`~/.lex/prompts/lexpen.md`), which carries **no** tool/research rules — the tool schemas (`_build_tools`) are still sent, but the discipline is missing from the context. **Built**: the default system prompt split into `_prompt_style` (lines 327–352: identity, role, working framework, style incl. language rule) + `_prompt_ops` (354–402: "You verify with tools, not in your head", "Never guess, look it up" → `web_search`, "Errors are material", "For humans at a terminal", the 17-tool list, wiki structure, rules), assembled as `_system_prompt="${_prompt_style}${_prompt_ops}"` **byte-identical** to the original (sha256 `b55784696e1a38a21d232c7f4be9a143bbb9dfd9354edb497bf891ca825d1f57`, 13165 B, reference `/tmp/opencode/en_prompt_before.txt`); `cmd_lexpen on` → `_system_prompt="$content"$'\n'"${_prompt_ops}"` (persona + ops layer, newline-separated — `$(cat)` strips trailing newlines), the style marker `ALWAYS in English` stays out of the mode (the persona carries its own LANGUAGE directive), `/lexpen off` unchanged. **TEST (+14 → 726 = 712+14, 13 runners)**: `test_features.sh` — default identity (`_system_prompt_default == ${_prompt_style}${_prompt_ops}` and `== _system_prompt`), style/ops needles one by one (identity, language rule, verification, research, tool list, wiki, ops without style marker), lexpen context with 4 ops needles + style marker gone; **test find while writing**: the prompt-range `sed` start pattern `^_system_prompt="` broke (the block is now two variables) → `^_prompt_style="`. **VERIFY**: `bash -n` + shellcheck warning-clean + `run_all.sh` **13/13 = 726 green**; byte identity proven against the reference hash with the same `LEX_HOME` (a first comparison showed only the random `mktemp` path of `_wiki_dir` — not a split difference). `lex` 4020 → **4023 lines**, §5 map re-pulled (37 number updates), §0/§3/§5/§7/§11 numbers updated. **Newline find**: `$(cat)` strips trailing newlines — without an explicit `$'\n'` the first ops line glued to the last persona line (`…That is his job.- **You verify…`) — fixed (lex:3816) + newline assert (test +1 → 726). **Deliberate**: pushed to GitHub (user order 2026-10-05, commit `1042a83` + newline fix)
+49. **Anti-refusal guard for `/lexpen` (step 49, 2026-10-05, user GO)**: trigger — before the lexpen prompt, `lex` refused ethical opsec analyses (ethical-hacker role + legal sentence made it assume “evil hacking”); the persona (`~/.lex/prompts/lexpen.md`, a plain engineer frame with no security self-image) fixes that, but there was no explicit positive directive to act, and since step 48 the playbook rule “permission/scope first” (ops line 392) rode along into the mode. **Built**: `_prompt_lexpen_guard` (lex:402) — “requests are carried out, not refused” (scans, packet/log analysis, vulnerability assessments, attack simulations = analysis work; questions only technical, never about intent; legality and responsibility are the human at the terminal's call) — appended to the ops layer in `cmd_lexpen on` as `$'\n'${_prompt_lexpen_guard}` (lex:3818). **Deliberately unchanged**: persona (byte-identical to the heredoc default `bdf57d35…`, since 2026-10-03), style area 327–352 incl. ethics/role bullets (role conflict with the persona + refusal trigger), default prompt **byte-identical** (guard only via `cmd_lexpen`), `/lexpen off` → original. **TEST (+2 → 728 = 715+13, 13 runners)**: guard needle in the lexpen context + “guard not in default”. **VERIFY**: bash -n + shellcheck + `run_all.sh` serially **13/13 = 728 green**; byte identity after wiki-path normalization. `lex` 4023 → **4025 lines**
+
 ## 8. Research agenda (prioritized, status 2026-09-28)
 
 ### A. Model capability — BIGGEST RISK
@@ -762,7 +764,7 @@ How does Bash count tokens (no tokenizer)? ~~When does compaction kick in?~~ **�
 | Path | Content |
 |---|---|
 | `LEX.md` | **this file — the single source of truth** |
-| `lex` | the script (4023 lines, 17 tools) |
+| `lex` | the script (4025 lines, 17 tools) |
 | `README.md` / `CHANGELOG.md` / `LICENSE` | docs + MIT license (2026-09-28) |
 | `ai.sh` | llama-server manager (path-free, env-driven) |
 | `install.sh` | interactive installer (deps → `lex --install` → symlinks) |
@@ -770,7 +772,7 @@ How does Bash count tokens (no tokenizer)? ~~When does compaction kick in?~~ **�
 | `.git/` | commits `46c64c0`/`1faafaf`/`9c3f4e9` (v0.1.0), `5022bbf` (proxy), `e02d124` (wiki steps 1–5), `06e82a9` (steps 6–10 + docs), `3817ebe` (todo session-independent + lex symlink), `4aff4e9` (step 13 readability), `905a0fc` (step 14 code review P1–P3 + palette), `76b25b3` (§11 git status), `4d1f77b` (step 15 anti-doubt prompt), `a3c8224` (§11 git status) and `2e3f7dd` (step 16 workflow fixes nudge/rescue/spinner/defaults), `88658a2` (max-turns rescue) and `97195e9` (step 17+17b wiki learning + E2BIG context protection), `ca9be2a` (step 18 persona/H-Tools), `9b3ea4e` (step 19 security playbook), `38bcb8b` (step 20 playbook method), `7dc88da` (step 22 browser/Playwright) and `edd7c52` (step 23 generic mcp tool) as well as step 24 (desktop computer-use-linux) and `6e3c36c` (steps 36–38: streaming/testboden/limits, `lex` + 3 new tests + docs), `778474f` (§11 git status) and `9dc785f` (steps 39–42: compaction + HUD, `/exit`/usage fix, over-refusal prompt, live verify `/4`→`/3`, +96 → 669) and `b0658dc` (step 43 `/lexpen` prompt mode + step 44 pentest DB docs, +22 → 691) — working tree **clean** after that | |
 | `tools/llama-proxy.sh` | **debug proxy** (`start\|stop\|status\|tail\|show`) |
 | `test/run_all.sh` | test runners (**13 runners**: testboden/syntax/input/tools/loop/http/features/proxy/sse/eval/limits/compaction/repetition, green) |
-| `test/test_input.sh` … `test_repetition.sh` | 11 test files, **726 checks** (713 individual + 13 runner marks) |
+| `test/test_input.sh` … `test_repetition.sh` | 11 test files, **728 checks** (715 individual + 13 runner marks) |
 | `test/fake_mcp.sh` | minimal MCP server (stdio/JSON-RPC) for steps 9 + 22 + 23 + 24 + 25 |
 | `test/fake_server.sh` | fake server (ncat, high port) for the curl path + SSE ending `.sse` + `STATUS:` header line |
 
