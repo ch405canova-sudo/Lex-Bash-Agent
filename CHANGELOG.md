@@ -331,6 +331,31 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   `$LEX_HOME/browser.pid`). click/type send `target` (= ref id) as
   schema ≥0.0.83 requires.
 
+### Changed 2026-10-05 — Ops-layer split in the system prompt (step 48)
+
+- **System prompt split into style + ops, `/lexpen` keeps the
+  tool/research rules:** live finding 2026-10-05 (proxychain/SOCKS5
+  task, session `20261005-022414`) — in persona mode **0 tool calls**
+  for a research task, the "answer" was a pure weights answer. Cause:
+  `cmd_lexpen` swaps slot 0 completely for the persona, which carries
+  no tool/research rules (tool schemas are still sent, but the
+  discipline is missing from the context). The default prompt now
+  consists of `_prompt_style` (identity, role, working framework,
+  style incl. language rule) + `_prompt_ops` ("You verify with tools,
+  not in your head", "Never guess, look it up" → `web_search`,
+  "Errors are material", "For humans at a terminal", the 17-tool list,
+  wiki structure, rules) and is assembled into `_system_prompt` —
+  **byte-identical** to the previous prompt (sha256 `b5578469…`,
+  13165 bytes). `cmd_lexpen on` appends `${_prompt_ops}` to the
+  persona (`"$content${_prompt_ops}"`), `/lexpen off` stays as before;
+  the style marker `ALWAYS in English` stays out of the mode (the
+  persona carries its own LANGUAGE directive). **Tests +13 → 725**
+  (default identity, style/ops needles one by one, ops needles in the
+  lexpen context, marker gone/restored); test find: the prompt-range
+  `sed` start pattern `^_system_prompt="` in `test_features.sh`
+  broke → `^_prompt_style="`. Byte identity proven against the
+  reference hash with the same `LEX_HOME`.
+
 ### Fixed 2026-10-03 — REPL prompt after empty Enter + spinner hardening (step 47)
 
 - **REPL prompt disappeared (user report "after tasks only a blinking

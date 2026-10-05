@@ -891,7 +891,7 @@ contains "perso (no doubt loops)" "No doubt loops" "$_system_prompt"
 # Backticks must be LITERAL in the evaluated prompt (no \` and no command substitution)
 contains "prompt (backtick literal)" '`bash`' "$_system_prompt"
 # Source text of the prompt block: every backtick must be escaped (otherwise bash executes it)
-_prompt_src="$(sed -n '/^_system_prompt="/,/(no tool call)."/p' "$LEX_BIN")"
+_prompt_src="$(sed -n '/^_prompt_style="/,/(no tool call)."/p' "$LEX_BIN")"
 _bt_all="$(printf '%s\n' "$_prompt_src" | grep -o '`' | wc -l | tr -d ' ')"
 _bt_esc="$(printf '%s\n' "$_prompt_src" | grep -o '\\`' | wc -l | tr -d ' ')"
 assert "prompt (every source backtick escaped)" "$_bt_all" "$_bt_esc"
@@ -1377,6 +1377,24 @@ sysc="$(jq -r '.[0].content' <<< "$_messages")"
 contains "lexpen (start: default prompt)" "You are Lex" "$sysc"
 assert "lexpen (flag initially off)" "" "${_lexpen_active:-}"
 
+# Ops-layer split (step 48): default = style + ops byte-identical,
+# lexpen = persona + ops (tool/research discipline stays).
+assert "split (default = style+ops)" "${_prompt_style}${_prompt_ops}" \
+  "$_system_prompt_default"
+assert "split (default = _system_prompt)" "$_system_prompt_default" \
+  "$_system_prompt"
+contains "split (style: identity)" "You are Lex" "$_prompt_style"
+contains "split (style: language rule)" "ALWAYS in English" "$_prompt_style"
+contains "split (ops: verification rule)" "You verify with tools, not in your head" \
+  "$_prompt_ops"
+contains "split (ops: research rule)" "Never guess, look it up" \
+  "$_prompt_ops"
+contains "split (ops: tool list)" "You have 17 tools" "$_prompt_ops"
+contains "split (ops: wiki rule)" "Your wiki is your memory" \
+  "$_prompt_ops"
+assert "split (ops without style marker)" "0" \
+  "$([[ "$_prompt_ops" == *"ALWAYS in English"* ]] && echo 1 || echo 0)"
+
 cmd_lexpen on > "$TMP/lexpen.out" 2>&1
 assert "lexpen (on: rc)" "0" "$?"
 out="$(cat "$TMP/lexpen.out")"
@@ -1389,6 +1407,12 @@ assert "lexpen (no XP4 in the context)" "0" \
   "$([[ "$sysc" == *XP4* ]] && echo 1 || echo 0)"
 assert "lexpen (flag set)" "1" "${_lexpen_active:-}"
 contains "lexpen (status message)" "Lex persona" "$out"
+# Ops layer stays in the lexpen context (finding 2026-10-05: 0 tool calls)
+contains "lexpen (ops: verification rule)" "You verify with tools, not in your head" "$sysc"
+contains "lexpen (ops: research rule)" "Never guess, look it up" "$sysc"
+contains "lexpen (ops: tool list)" "You have 17 tools" "$sysc"
+assert "lexpen (style marker replaced)" "0" \
+  "$([[ "$sysc" == *"ALWAYS in English"* ]] && echo 1 || echo 0)"
 
 cmd_lexpen on > "$TMP/lexpen.out" 2>&1
 contains "lexpen (2nd call: hint instead of error)" "already active" \
