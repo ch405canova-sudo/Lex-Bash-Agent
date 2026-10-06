@@ -175,14 +175,18 @@ not_contains "sse (server down → no empty-answer nudge)" "last answer was empt
 # ---------------------------------------------------------------------------
 # 4. HTTP error (500) → real error with status code
 # ---------------------------------------------------------------------------
+# THREE 500 lines: call_api tries three times by default (2 retries, step
+# 53) — only when ALL of them fail may the turn end with rc != 0. A success
+# line in between would have passed silently.
 statusfile="$TMP/status.json"
-printf 'STATUS:500|{"error":"boom"}\n' > "$statusfile"
+printf 'STATUS:500|{"error":"boom"}\n%.0s' 1 2 3 > "$statusfile"
 start_fake "$statusfile"
 rc=0
 run_turn "Hello" >"$TMP/out4.txt" 2>"$TMP/err4.txt" || rc=$?
 err4="$(cat "$TMP/err4.txt")"
 check "sse (HTTP 500 → rc != 0)" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
 contains "sse (HTTP 500 → status code named)" "HTTP 500" "$err4"
+contains "sse (HTTP 500 → all attempts exhausted)" "after 3 attempt(s)" "$err4"
 not_contains "sse (HTTP 500 → no nudge)" "last answer was empty" "$err4"
 
 # ---------------------------------------------------------------------------

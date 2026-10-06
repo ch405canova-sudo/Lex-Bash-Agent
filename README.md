@@ -383,7 +383,11 @@ Important ENV variables — the exact list from `usage()` / `lex --help`:
 `LEX_HTOOLS_DIR`, `LEX_TRACE` (force trace/HUD/spinner on stderr),
 `LEX_SHOW_REASONING` (0 = no thinking block), `LEX_REASONING_MAX`
 (truncation), `LEX_MCP`/`LEX_MCP_TIMEOUT` (MCP on/off and time limit),
-`LEX_SEARCH_URL`/`LEX_SEARCH_TIMEOUT` (search endpoint and time limit).
+`LEX_SEARCH_URL`/`LEX_SEARCH_TIMEOUT` (search endpoint and time limit),
+`LEX_API_RETRIES` (retries on 429/5xx and curl errors, default 2, max
+10), `LEX_LOOP_GUARD=off` (turn the fail memory for identical tool runs
+off), `LEX_REASONING_STORE_MAX` (upper limit for stored reasoning,
+default 20000 characters).
 
 The compaction block in detail: `LEX_CTX_LIMIT` is the context size used
 for threshold and HUD (default 262144), `LEX_COMPACT` is `on|off`
@@ -396,7 +400,7 @@ LEX_COMPACT_BUFFER)`.
 ## Tests
 
 ```bash
-./test/run_all.sh          # 13 runners / 728 checks (728 PASS + 1 SKIP), exit 0 only when all are green
+./test/run_all.sh          # 13 runners / 750 checks (750 PASS + 1 SKIP), exit 0 only when all are green
 shellcheck -S warning lex ai.sh install.sh test/*.sh tools/*.sh
 ```
 
@@ -459,7 +463,7 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 4025 lines, 17 tools
+lex              the agent — one file, 4212 lines, 17 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)

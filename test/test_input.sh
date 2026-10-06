@@ -158,6 +158,122 @@ else
   FAIL=1
 fi
 
+# 5f. Ctrl+C at the prompt (step 51): lex must NOT die. Before the fix
+# there was no trap … INT — a single Ctrl+C ended the process (live finding
+# 2026-10-05, session 125104). The first press discards only the line,
+# /exit finishes cleanly with rc 0.
+intlog="$TMP/int_prompt.log"
+( sleep 2; printf '\003'; sleep 1; printf '/exit\n' ) | \
+  LEX_MOCK="done" LEX_HOME="$TMP" timeout 30 script -qec "bash '$LEX_BIN'" /dev/null > "$intlog" 2>&1
+rc=$?
+out="$(tr -d '\r' < "$intlog")"
+if (( rc == 0 )) && [[ "$out" == *"Bye!"* ]]; then
+  printf '  [PASS] repl (Ctrl+C at prompt: REPL lives, /exit rc 0)\n'
+else
+  printf '  [FAIL] repl (Ctrl+C at prompt: rc=%s Bye=%s)\n' \
+    "$rc" "$([[ "$out" == *Bye!* ]] && echo yes || echo no)" >&2
+  printf '         output: %q\n' "$out" >&2
+  FAIL=1
+fi
+if [[ "$out" == *"^C"* ]]; then
+  printf '  [PASS] repl (Ctrl+C at prompt: ^C in transcript)\n'
+else
+  printf '  [FAIL] repl (Ctrl+C at prompt: no ^C in transcript)\n' >&2
+  FAIL=1
+fi
+
+# 5g. Ctrl+C during the tool run (step 51): turn aborted, child dead
+# (timeout --foreground, otherwise sleep kept running until tool_timeout:
+# 20 s measured), session protocol-conform (tool_call gets an answer),
+# REPL lives. Regression without the fix: rc=124 via timeout 30 (child
+# runs the full 60 s).
+smock="$TMP/int_turn.json"
+printf '%s\n' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"tcI","type":"function","function":{"name":"bash","arguments":"{\"command\":\"sleep 60\"}"}}]}}]}' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"Done.","tool_calls":[]}}]}' > "$smock"
+t0=$SECONDS
+( sleep 1; printf 'start\n'; sleep 2; printf '\003'; sleep 1; printf '/exit\n' ) | \
+  LEX_MOCK_FILE="$smock" LEX_HOME="$TMP" timeout 30 script -qec "bash '$LEX_BIN'" /dev/null > "$intlog" 2>&1
+rc=$?
+dauer=$((SECONDS - t0))
+out="$(tr -d '\r' < "$intlog")"
+if (( rc == 0 )) && [[ "$out" == *"Turn aborted"* ]] && [[ "$out" == *"Bye!"* ]]; then
+  printf '  [PASS] repl (Ctrl+C in turn: aborted, REPL lives, rc 0, %ss)\n' "$dauer"
+else
+  printf '  [FAIL] repl (Ctrl+C in turn: rc=%s duration=%ss)\n' "$rc" "$dauer" >&2
+  printf '         output: %q\n' "$out" >&2
+  FAIL=1
+fi
+if (( dauer < 25 )); then
+  printf '  [PASS] repl (Ctrl+C in turn: child dead at once — %ss << 60s sleep)\n' "$dauer"
+else
+  printf '  [FAIL] repl (Ctrl+C in turn: child kept running (%ss — timeout without --foreground?)\n' "$dauer" >&2
+  FAIL=1
+fi
+int_sess="$(ls -t "$TMP"/sessions/*/session.jsonl 2>/dev/null | head -1)"
+if [[ -n "$int_sess" ]] && grep -q 'Turn aborted via Ctrl+C' "$int_sess"; then
+  printf '  [PASS] repl (Ctrl+C in turn: tool-answer marker in the session)\n'
+else
+  printf '  [FAIL] repl (Ctrl+C in turn: marker missing in the session)\n' >&2
+  FAIL=1
+fi
+
+# 5h. Session grant (step 52): at the first sudo ONE y/N question on the
+# TTY, afterwards sudo runs in the same session without further questions
+# (no y per command — user decision 2026-10-05). Fake sudo in PATH logs
+# the calls: exactly 1x "entire session" in the transcript, both sudo
+# commands executed (second run WITHOUT a second question).
+fakebin="$TMP/fakebin"
+mkdir -p "$fakebin"
+cat > "$fakebin/sudo" <<'FAKESUDO'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FAKE_SUDO_LOG:?}"
+if [[ "${1:-}" == "-n" && "${2:-}" == "true" ]]; then exit 0; fi
+echo "SUDO-EXECUTED"
+exit 0
+FAKESUDO
+chmod 755 "$fakebin/sudo"
+glog="$TMP/fakesudo.log"
+: > "$glog"
+gmock="$TMP/grant.json"
+printf '%s\n' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"tcG","type":"function","function":{"name":"bash","arguments":"{\"command\":\"sudo -n echo SUDO-RAN\"}"}}]}}]}' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"First run done.","tool_calls":[]}}]}' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"tcH","type":"function","function":{"name":"bash","arguments":"{\"command\":\"sudo -n echo AGAIN-RAN\"}"}}]}}]}' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"Second run done.","tool_calls":[]}}]}' > "$gmock"
+( sleep 1; printf 'start\n'; sleep 3; printf 'y\n'; sleep 3; printf 'again\n'; sleep 3; printf '/exit\n' ) | \
+  PATH="$fakebin:$PATH" FAKE_SUDO_LOG="$glog" LEX_MOCK_FILE="$gmock" LEX_HOME="$TMP" \
+  timeout 40 script -qec "bash '$LEX_BIN'" /dev/null > "$intlog" 2>&1
+rc=$?
+out="$(tr -d '\r' < "$intlog")"
+if (( rc == 0 )) && [[ "$out" == *"Bye!"* ]]; then
+  printf '  [PASS] grant (session: y → both sudo runs, rc 0)\n'
+else
+  printf '  [FAIL] grant: rc=%s Bye!=%s\n' \
+    "$rc" "$([[ "$out" == *Bye!* ]] && echo yes || echo no)" >&2
+  printf '         output: %q\n' "$out" >&2
+  FAIL=1
+fi
+n_grant="$(printf '%s' "$out" | grep -o 'entire session' | wc -l | tr -d ' ')"
+if (( n_grant == 1 )); then
+  printf '  [PASS] grant (exactly ONE session question — no y/N per command)\n'
+else
+  printf '  [FAIL] grant: %sx "entire session" in transcript (expected 1)\n' "$n_grant" >&2
+  FAIL=1
+fi
+if grep -q 'echo SUDO-RAN' "$glog" && grep -q 'echo AGAIN-RAN' "$glog"; then
+  printf '  [PASS] grant (second sudo executed without a question)\n'
+else
+  printf '  [FAIL] grant (fake sudo log incomplete): %s\n' "$(tr '\n' ';' < "$glog")" >&2
+  FAIL=1
+fi
+if [[ "$out" == *"First run done."* ]] && [[ "$out" == *"Second run done."* ]]; then
+  printf '  [PASS] grant (both turns visible in the REPL)\n'
+else
+  printf '  [FAIL] grant (turns missing in transcript)\n' >&2
+  FAIL=1
+fi
+
 # 6. LEX_MOCK_FILE: first line is emitted
 mock="$TMP/mock.json"
 printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"From file."}}]}' > "$mock"

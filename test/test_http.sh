@@ -131,6 +131,73 @@ mrc=0; out="$(run_turn "Big" 2>/dev/null)" || mrc=$?
 assert "http (Body > 128 KiB works, E2BIG fix)" "Big body ok." "$out"
 assert "http (Body > 128 KiB rc)" "0" "$mrc"
 
+# 7. Retry path (step 53, §6 #36): HTTP 500 is RETRIED before the turn dies
+#    — the OpenAI SDK norm. Script file: first line 500, second line valid →
+#    after one backoff the answer must come.
+resp4="$TMP/responses4.json"
+printf '%s\n%s\n' \
+  'STATUS:500|{"error":"boom"}' \
+  '{"choices":[{"index":0,"message":{"role":"assistant","content":"After the retry.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}' > "$resp4"
+kill "$FAKE_PID" 2>/dev/null || true
+FAKE_PID=""
+FAKE_PORT=$((20000 + RANDOM % 8000))
+FAKE_PID="$(bash "$SCRIPT_DIR/fake_server.sh" "$FAKE_PORT" "$resp4")"
+if [[ -z "$FAKE_PID" ]]; then
+  echo "FAILED: fake server (4th start) could not be started" >&2
+  exit 1
+fi
+for _ in $(seq 1 30); do
+  if nc -z 127.0.0.1 "$FAKE_PORT" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+export LEX_API_URL="http://127.0.0.1:$FAKE_PORT/v1/chat/completions"
+export LEX_API_RETRIES=1
+_api_retries=1   # load_config already ran when sourced — tier 4 never fires then
+# shellcheck disable=SC2154  # _log_dir comes from the sourced lex
+rm -f "$_log_dir/lex.log"
+setup_messages
+mrc=0; out="$(run_turn "After the retry" 2>"$TMP/err4.txt")" || mrc=$?
+assert "retry (answer after HTTP 500)" "After the retry." "$out"
+assert "retry (rc=0)" "0" "$mrc"
+assert "retry (backoff logged)" "1" \
+  "$([[ "$(cat "$_log_dir/lex.log" 2>/dev/null)" == *"attempt 1 failed"* ]] && echo 1 || echo 0)"
+
+# Without budget (LEX_API_RETRIES=0): the same 500 must fail hard.
+resp5="$TMP/responses5.json"
+printf '%s\n' 'STATUS:500|{"error":"boom"}' > "$resp5"
+kill "$FAKE_PID" 2>/dev/null || true
+FAKE_PID=""
+FAKE_PORT=$((20000 + RANDOM % 8000))
+FAKE_PID="$(bash "$SCRIPT_DIR/fake_server.sh" "$FAKE_PORT" "$resp5")"
+if [[ -z "$FAKE_PID" ]]; then
+  echo "FAILED: fake server (5th start) could not be started" >&2
+  exit 1
+fi
+for _ in $(seq 1 30); do
+  if nc -z 127.0.0.1 "$FAKE_PORT" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+export LEX_API_URL="http://127.0.0.1:$FAKE_PORT/v1/chat/completions"
+export LEX_API_RETRIES=0
+_api_retries=0
+rm -f "$_log_dir/lex.log"
+setup_messages
+mrc=0; out="$(run_turn "Without budget" 2>"$TMP/err5.txt")" || mrc=$?
+assert "retry off (rc != 0)" "1" "$([[ "$mrc" -ne 0 ]] && echo 1 || echo 0)"
+assert "retry off (no backoff in the log)" "0" \
+  "$([[ "$(cat "$_log_dir/lex.log" 2>/dev/null)" == *"attempt 1 failed"* ]] && echo 1 || echo 0)"
+if grep -q "HTTP 500" "$TMP/err5.txt" 2>/dev/null; then
+  printf '  [PASS] retry off (HTTP 500 named)\n'
+else
+  printf '  [FAIL] retry off (no HTTP 500 in the message): %q\n' "$(cat "$TMP/err5.txt" 2>/dev/null)" >&2
+  FAIL=1
+fi
+unset LEX_API_RETRIES
+
 if (( FAIL > 0 )); then
   echo "FAILED: $FAIL test(s) in test_http.sh" >&2
   exit 1

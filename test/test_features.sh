@@ -75,8 +75,23 @@ load_config || { echo "FAILED: load_config" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # §6 #8 — portability guards
 # ---------------------------------------------------------------------------
-out="$(_run_limited 5 echo limited 2>&1)"
-assert "_run_limited (runs)" "limited" "$out"
+_run_limited 5 echo limited
+rl_rc=$?
+assert "_run_limited (output in \$_rl_out)" "limited" "$_rl_out"
+check "_run_limited (rc=0)" "$([[ "$rl_rc" == "0" ]] && echo 1 || echo 0)"
+
+# Step 53 (§6 #35): the hard deadline works WITHOUT pipes — child gone,
+# rc=124. The old version read stdout from a pipe until EOF: with `sleep`
+# the runner hung forever on the read (bug-bash/msg00059) and the test hit
+# the harness timeout.
+rl_t0=$(date +%s)
+_run_limited 1 sleep 20
+rl_rc=$?
+rl_dt=$(( $(date +%s) - rl_t0 ))
+check "_run_limited (timeout rc=124)" "$([[ "$rl_rc" == "124" ]] && echo 1 || echo 0)"
+check "_run_limited (back after the deadline, ${rl_dt}s)" "$([[ "$rl_dt" -le 6 ]] && echo 1 || echo 0)"
+check "_run_limited (no hung flag on a clean timeout)" "$([[ -z "${_rl_hung:-}" ]] && echo 1 || echo 0)"
+check "_run_limited (child process is dead)" "$(kill -0 "${_rl_pid:-0}" 2>/dev/null && echo 0 || echo 1)"
 
 out="$(_abs_path "$TMP/x.txt")"
 assert "_abs_path (existing file)" "$TMP/x.txt" "$out"
@@ -206,6 +221,90 @@ contains "--approve also AFTER the command" "approve: 1" "$out"
 
 out="$(LEX_APPROVE=1 "$LEX_BIN" --status 2>/dev/null)"
 contains "LEX_APPROVE=1 (ENV)" "approve: 1" "$out"
+
+# #50 (2026-10-05): visible approval prompt — command truncated, question last
+# (cursor behind it) so the (y/N) request cannot scroll off screen.
+long="$(printf 'x%.0s' {1..400})"
+prev="$(_tty_preview_text 'Approve command' "$long")"
+if ((${#prev} < 300)) && [[ "$prev" == *'…(+400 bytes)'* ]]; then
+  check "TTY preview (400-byte cmd truncated)" "1"
+else
+  check "TTY preview (400-byte cmd truncated)" "0"
+fi
+if grep -qF "printf 'allow? (y/N): ' > /dev/tty" "$LEX_BIN"; then
+  check "TTY preview (question last line, no newline)" "1"
+else
+  check "TTY preview (question last line, no newline)" "0"
+fi
+
+# ---------------------------------------------------------------------------
+# #52 (2026-10-05): session grant instead of y/N per command — ask ONCE per
+# session (default), auto-approve afterwards; no = y/N per command;
+# /autosudo and LEX_SUDO_APPROVE=0 also skip the session question.
+# Only test state paths that reach NO prompt — otherwise the test would
+# wait on /dev/tty (same SKIP rule as the sudo gate above).
+# ---------------------------------------------------------------------------
+if grep -qF '_sudo_grant_request()' "$LEX_BIN"; then
+  check "session grant (function exists)" "1"
+else
+  check "session grant (function exists)" "0"
+fi
+if grep -qF "printf 'allow sudo for this entire session? (y/N): ' > /dev/tty" "$LEX_BIN"; then
+  check "session grant (question visible, no newline)" "1"
+else
+  check "session grant (question visible, no newline)" "0"
+fi
+if grep -q '_sudo_grant="0"' "$LEX_BIN" && grep -q 'session grant declined' "$LEX_BIN"; then
+  check "session grant (no → state declined → y/N)" "1"
+else
+  check "session grant (no → state declined → y/N)" "0"
+fi
+
+if sudo -n true 2>/dev/null; then
+  _sudo=1; _sudo_approve=1; _autosudo=0
+  _sudo_grant="1"
+  if _sudo_gate 'sudo -n true'; then
+    check "grant=1 (second sudo without any question)" "1"
+  else
+    check "grant=1 (second sudo without any question)" "0"
+  fi
+  _sudo_grant=""; _autosudo=1
+  if _sudo_gate 'sudo -n true'; then
+    check "/autosudo skips the session question" "1"
+  else
+    check "/autosudo skips the session question" "0"
+  fi
+  _autosudo=0; _sudo_approve=0
+  if _sudo_gate 'sudo -n true'; then
+    check "SUDO_APPROVE=0 skips the session question" "1"
+  else
+    check "SUDO_APPROVE=0 skips the session question" "0"
+  fi
+  _sudo_approve=1
+  if _tty_ok; then
+    printf '  [SKIP] session-grant path without TTY (TTY present — the prompt would wait)\n'
+  else
+    _sudo_grant=""
+    if _sudo_gate 'sudo -n true'; then
+      check "no TTY: session question refused → no approval" "0"
+    else
+      [[ "$_sudo_gate_reason" == "no approval granted" ]] \
+        && check "no TTY: session question refused → no approval" "1" \
+        || check "no TTY: session question refused → no approval" "0 ($_sudo_gate_reason)"
+    fi
+    _sudo_grant="0"
+    if _sudo_gate 'sudo -n true'; then
+      check "grant=0 (→ y/N per command, refused without TTY)" "0"
+    else
+      [[ "$_sudo_gate_reason" == "no approval granted" ]] \
+        && check "grant=0 (→ y/N per command, refused without TTY)" "1" \
+        || check "grant=0 (→ y/N per command, refused without TTY)" "0 ($_sudo_gate_reason)"
+    fi
+  fi
+  _sudo_grant=""; _sudo=1; _sudo_approve=1; _autosudo=0
+else
+  printf '  [SKIP] session-grant states (sudo ticket not valid — only static checks)\n'
+fi
 
 # ---------------------------------------------------------------------------
 # §6.5 — session JSONL + reasoning only in the session (not in the context)
@@ -1455,6 +1554,147 @@ contains "usage (mentions /lexpen)" "/lexpen" "$out"
 contains "usage (mentions /lex)" "/lex " "$out"
 out="$(cmd_status)"
 contains "status (prompt line standard)" "prompt    : standard" "$out"
+
+# ---------------------------------------------------------------------------
+# Step 51 — hard session permissions (umask-proof: sessions/ 700, dir 700,
+# session.jsonl 600). Before the fix session_init only used mkdir/append —
+# depending on the caller's umask it came out as 775/664 (finding
+# 2026-10-05: new session 125104 = 775, the housekeeping chmod did not hold).
+# ---------------------------------------------------------------------------
+printf 'Permission check\n' | LEX_MOCK="done" "$LEX_BIN" --oneshot >/dev/null 2>&1
+sroot="$LEX_HOME/sessions"
+sdir_name="$(ls -t "$sroot" 2>/dev/null | head -1)"
+sdir="$sroot/$sdir_name"
+sfile="$sdir/session.jsonl"
+stat_a() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+if [[ -f "$sfile" ]]; then
+  assert "session-perms (sessions/ = 700)" "700" "$(stat_a "$sroot")"
+  assert "session-perms (session dir = 700)" "700" "$(stat_a "$sdir")"
+  assert "session-perms (session.jsonl = 600)" "600" "$(stat_a "$sfile")"
+else
+  printf '  [FAIL] session-perms (session.jsonl not created: %s)\n' "$sfile" >&2
+  FAIL=1
+fi
+
+# ---------------------------------------------------------------------------
+# Steps 53-56 — fix package from the 2026-10-06 research (§6 #35-#38):
+# P3 retry, P4 redaction, P5 fail memory (in test_loop.sh), P7 85 % warning
+# + pinning, P8 reasoning cap. P1/P2 (_run_limited) sits above under
+# portability guards.
+# ---------------------------------------------------------------------------
+printf 'fix package (redaction/retry/compaction/reasoning)\n'
+
+# P4: _redact is the only text output of the redactor
+assert "_redact (password=)" "password=<REDACTED>" "$(_redact 'password=hunter2')"
+assert "_redact (Passwort:)" "Passwort: <REDACTED>" "$(_redact 'Passwort: hunter2')"
+assert "_redact (JSON stays valid)" "1" \
+  "$(o="$(_redact '{"a":"password=hunter2"}')"; jq -e '.a' >/dev/null 2>&1 <<< "$o" && echo 1 || echo 0)"
+assert "_redact (carrier word untouched)" "task-suffix ok" "$(_redact 'task-suffix ok')"
+# JSON safety of the redactor (found by the live test 2026-10-06): an
+# escaped quotation pair in session.jsonl must NOT be eaten — otherwise the
+# line is no longer valid JSON.
+_rj_ok() { jq -e . >/dev/null 2>&1 <<< "$1" && echo 1 || echo 0; }
+_rj='{"type":"m","reasoning":"x \"password=TestSecret123\" y"}'
+_rout="$(_redact "$_rj")"
+assert "_redact (JSON with escaped quotes valid)" "1" "$(_rj_ok "$_rout")"
+assert "_redact (JSON with escaped quotes, secret gone)" "0" \
+  "$([[ "$_rout" == *TestSecret123* ]] && echo 1 || echo 0)"
+_rj2='{"r":"password=Tail12345\" weiter"}'
+_rout2="$(_redact "$_rj2")"
+assert "_redact (JSON value before \\\" valid)" "1" "$(_rj_ok "$_rout2")"
+assert "_redact (JSON value before \\\" redacted)" "0" \
+  "$([[ "$_rout2" == *Tail12345* ]] && echo 1 || echo 0)"
+assert "_redact (value with backslash partially redacted)" 'password=<REDACTED>\Windows' \
+  "$(_redact 'password=C:\Windows')"
+assert "_redact (sk token gone)" "0" \
+  "$([[ "$(_redact 'sk-abcdef123456')" == *abcdef123456* ]] && echo 1 || echo 0)"
+assert "_redact (Bearer gone)" "0" \
+  "$([[ "$(_redact 'Authorization: Bearer abcdef123456')" == *abcdef123456* ]] && echo 1 || echo 0)"
+assert "_redact (URL credentials gone)" "0" \
+  "$([[ "$(_redact 'https://user:s3cr3t@example.com/x')" == *s3cr3t* ]] && echo 1 || echo 0)"
+
+# P4: log() redacts every line before it hits the disk
+rm -f "$_log_dir/lex.log"
+log "test password=hunter2"
+log "test api_key=sk-test123456"
+lf="$_log_dir/lex.log"
+lcontent="$(cat "$lf" 2>/dev/null)"
+assert "log (log file created)" "1" "$([[ -s "$lf" ]] && echo 1 || echo 0)"
+assert "log (password redacted)" "0" "$([[ "$lcontent" == *hunter2* ]] && echo 1 || echo 0)"
+assert "log (api_key redacted)" "0" "$([[ "$lcontent" == *sk-test123456* ]] && echo 1 || echo 0)"
+
+# P4: session_write (session.jsonl is a documentation file, not a secret store)
+_session_file="$TMP/sess_redact.jsonl"
+rm -f "$_session_file"
+session_write "$(jq -c -n --arg v 'password=hunter2' '{type:"t",v:$v}')"
+scontent="$(cat "$_session_file" 2>/dev/null)"
+assert "session_write (line is valid JSON)" "1" \
+  "$(jq -e '.v' >/dev/null 2>&1 <<< "$scontent" && echo 1 || echo 0)"
+assert "session_write (secret gone)" "0" \
+  "$([[ "$scontent" == *hunter2* ]] && echo 1 || echo 0)"
+_session_file=""
+
+# P4: display (_md_render) — only the screen, never the model context
+rout="$(printf 'password=hunter2\n' | render_markdown)"
+assert "_md_render (display redacted)" "0" \
+  "$([[ "$rout" == *hunter2* ]] && echo 1 || echo 0)"
+
+# P4: wiki write paths redact, everything else does not (AnonOps task)
+tool_write_file "$LEX_WIKI_DIR/log.md" 'Entry: password=hunter2' >/dev/null 2>&1
+assert "wiki write_file (redacted)" "0" \
+  "$(grep -q hunter2 "$LEX_WIKI_DIR/log.md" 2>/dev/null && echo 1 || echo 0)"
+tool_write_file "$TMP/keep_cfg.sh" 'password=stays123' >/dev/null 2>&1
+assert "write_file outside wiki (untouched)" "1" \
+  "$(grep -q 'stays123' "$TMP/keep_cfg.sh" 2>/dev/null && echo 1 || echo 0)"
+tool_append_file "$LEX_WIKI_DIR/log.md" 'Follow-up: password=follow999' >/dev/null 2>&1
+assert "wiki append_file (redacted)" "0" \
+  "$(grep -q follow999 "$LEX_WIKI_DIR/log.md" 2>/dev/null && echo 1 || echo 0)"
+
+# P3: backoff table of the OpenAI SDK (0.8 s → 8 s, jitter ±25 %)
+d1="$(_retry_delay 1)"; c1="$(( 10#${d1/./} ))"
+assert "_retry_delay (format n.nn)" "1" "$([[ "$d1" =~ ^[0-9]+\.[0-9]{2}$ ]] && echo 1 || echo 0)"
+check "_retry_delay 1 (0.60–1.00 s)" "$([[ "$c1" -ge 60 && "$c1" -le 100 ]] && echo 1 || echo 0)"
+d4="$(_retry_delay 4)"; c4="$(( 10#${d4/./} ))"
+check "_retry_delay 4 (at most 8.00 s)" "$([[ "$c4" -le 800 ]] && echo 1 || echo 0)"
+check "_retry_delay 4 (at least 5.00 s)" "$([[ "$c4" -ge 500 ]] && echo 1 || echo 0)"
+assert "config knob api_retries (default)" "2" "${_api_retries:-?}"
+
+# P7: 85 % warning — even with LEX_COMPACT=off, once per nearly-full period
+save_ctx="$_ctx_limit"; save_compact="$_compact"; save_msgs="$_messages"
+_ctx_limit=10000; _compact=off; _compact_warned=0
+_messages="$(jq -nc --arg c "$(printf 'x%.0s' {1..60000})" '[{role:"user",content:$c}]')"
+_compact_run >/dev/null 2>"$TMP/w1.txt"
+w1="$(cat "$TMP/w1.txt")"
+contains "P7 (context warning from 85 %)" "Context" "$w1"
+_compact_run >/dev/null 2>"$TMP/w2.txt"
+w2="$(cat "$TMP/w2.txt")"
+assert "P7 (only once per period)" "0" "$([[ "$w2" == *"Context"* ]] && echo 1 || echo 0)"
+_messages='[{"role":"user","content":"short"}]'
+_compact_run >/dev/null 2>&1
+_messages="$(jq -nc --arg c "$(printf 'x%.0s' {1..60000})" '[{role:"user",content:$c}]')"
+_compact_run >/dev/null 2>"$TMP/w3.txt"
+w3="$(cat "$TMP/w3.txt")"
+contains "P7 (re-armed after the context fell)" "Context" "$w3"
+assert "P7 (pinning line in the compaction prompt)" "1" \
+  "$(grep -q 'Pinning' "$LEX_BIN" && echo 1 || echo 0)"
+
+# P8: cap the stored reasoning (the session grew by the thinking text per turn)
+_session_file="$TMP/sess_cap.jsonl"
+rm -f "$_session_file"
+export LEX_REASONING_STORE_MAX=50
+big_reasoning="$(printf 'x%.0s' {1..500})"
+append_message_json '{"role":"assistant","content":"ok"}' "$big_reasoning"
+rec="$(cat "$_session_file" 2>/dev/null)"
+rlen="$(jq -r '.reasoning | length' <<< "$rec" 2>/dev/null || echo 99999)"
+assert "P8 (reasoning store capped)" "1" "$([[ "$rlen" -le 200 ]] && echo 1 || echo 0)"
+assert "P8 (cap message in the log)" "1" \
+  "$(grep -q "session store capped" "$_log_dir/lex.log" 2>/dev/null && echo 1 || echo 0)"
+assert "P8 (cap hint in the store)" "1" \
+  "$([[ "$rec" == *"LEX_REASONING_STORE_MAX"* ]] && echo 1 || echo 0)"
+unset LEX_REASONING_STORE_MAX
+_session_file=""
+_ctx_limit="$save_ctx"; _compact="$save_compact"; _messages="$save_msgs"
+_compact_warned=0
 
 if (( FAIL > 0 )); then
   echo "FAILED: $FAIL test(s) in test_features.sh" >&2

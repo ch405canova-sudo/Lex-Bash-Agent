@@ -230,6 +230,13 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   `wait` until the page is idle helps. Plus a stub `browser_wait_for`
   in `test/fake_mcp.sh` and two needles.
 
+- **Three ENV/config knobs (steps 53–56):** `LEX_API_RETRIES` (or
+  `api_retries` in `settings.json`) — retries on HTTP 429/5xx and curl
+  errors, default 2, clamped ≤10; `LEX_LOOP_GUARD=off` — switches the
+  fail memory in `run_turn` off; `LEX_REASONING_STORE_MAX` — upper
+  limit for the `reasoning` stored in the session (default 20000
+  characters).
+
 ### Changed
 
 - **Palette / readability (step 14):** all ANSI sequences now run
@@ -330,6 +337,128 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   the Chrome service for cdp configs via `_ensure_browser()` (PID file
   `$LEX_HOME/browser.pid`). click/type send `target` (= ref id) as
   schema ≥0.0.83 requires.
+
+### Fixed 2026-10-06 — fix package steps 53–56 (tool hang, HTTP 500, redaction, fail memory)
+
+- **Tool runs no longer hang on the pipe**: `_run_limited` now writes
+  the child chain output into a temp file (`$_rl_out`) instead of a
+  pipe — the reader can no longer stay blocked on an open write end
+  (basis: bug-bash msg00059, opencode #32504, codey #65). Plus
+  `_kill_tree()`: BFS collects the chain up to the root and kills
+  leaf→root (TERM, KILL after 3 s), a watchdog at `secs+10` puts its
+  own timer around the run, state lives in `$_rl_pid`/`$_rl_hung`, the
+  rc of `_run_limited` is the function status. `tool_bash` hangs on
+  it. Live: `sleep 20` with `LEX_TOOL_TIMEOUT=5` → tool result
+  `Exit-Code: 124`, the turn continues.
+- **HTTP errors are retried (P3/P6)**: `call_api` retries 429/5xx and
+  curl network errors up to 2× (OpenAI SDK norm), `_retry_delay` uses
+  0.8/1.6/3.2 s with an 8 s ceiling and ±25 % jitter; new config
+  `api_retries` / `LEX_API_RETRIES` (default 2, clamped ≤10, tier
+  1/2/4). Error messages now carry the HTTP code, a body snippet
+  (400 B), the byte count, the attempt count and — for
+  `parse_error`/`invalid string` — the hint that special characters or
+  size in the tool arguments are the cause (llama.cpp #21660/#22072).
+- **Secrets no longer leave lex (P4)**: `_redact()`/`_redact_var()`
+  mask the own API key, `password`/`secret`/`token`/`apikey`/`auth`
+  pairs, `Bearer`/`Basic`, token prefixes (`sk-`, `ghp-`, `xox…`) and
+  URL credentials — applied in `log()`, `session_write()`, the display
+  (`_trace_result`, `_trace_reasoning`, `_md_render`) and the wiki
+  write paths. Deliberately **not** in the model context and not on
+  config/script targets. The value group stays JSON-safe (an escaped
+  quotation pair as a whole, open values without `"`/`\`).
+- **Fail memory against tool loops (P5)**: `run_turn` keeps the
+  signature `cksum(name|args|result[0..200])` per tool call; three
+  identical runs in a row → soft nudge with an answer obligation, then
+  identical again → hard stop (`rc 1`). The result bytes are part of
+  the signature so legitimate polling (growing file, flipping status)
+  resets the counter. Switch via `LEX_LOOP_GUARD=off`, session records
+  `{type:loop_guard}`.
+- **Context warning from 85 % + pinning (P7)**: `_compact_run` prints
+  `⚠️ Context X % full …` **before** the compaction gate, independent
+  of `LEX_COMPACT` (re-armed via `_compact_warned`, once per “nearly
+  full” period); `_compact_prompt` appends a pinning block (goal,
+  running plans, open decisions and paths always carry into the new
+  summary).
+- **Reasoning cap (P8)**: `append_message_json` limits the stored
+  `reasoning` to `LEX_REASONING_STORE_MAX` (default 20000 characters)
+  and writes the remainder into the line as a hint.
+- **Live test 2026-10-06** (isolated `LEX_HOME`, real LLM turns):
+  oneshot, tool timeout, redaction, fail memory, 85 % warning and
+  reasoning cap all confirmed live. **Finding along the way**: the
+  first redactor ate the `\` before the closing `"` and made one
+  session.jsonl line invalid → value group hardened
+  (`wiki/errors/2026-10-06-redaction-brach-session-jsonl.md`); after
+  that the session is 100 % parseable and the secret is nowhere in
+  `LEX_HOME`.
+- **Tests +41 → 791** (13 runners, DE+EN green): `test_features` +38
+  (fix package incl. JSON safety), `test_loop` +9 (fail memory
+  soft/hard/off), `test_http` +6 (retry with 3×500, with/without
+  budget), `test_sse` +1 (three attempts). No commit/push (order
+  missing).
+
+### Fixed 2026-10-05 — sudo asked y/N per command (step 52)
+
+- **Session grant instead of y/N per command (new default)**: the sudo
+  gate asked for a y/N approval per sudo command whenever a ticket was
+  valid (58 % of the run time in the AnonOps run, 32 sudo calls). New:
+  process state `_sudo_grant` (`""` unasked → `"1"` granted →
+  `"0"` declined) + `_sudo_grant_request()` — at the first sudo of the
+  session ONE question `allow sudo for this entire session? (y/N): `
+  (title + truncated command like the approval prompt, question without
+  newline, abortable with Ctrl+C); yes = the session runs without
+  further questions, no = stores `"0"` and keeps asking y/N per command
+  (old path). `/status` shows `grant: open|granted|declined`,
+  `/autosudo on` and `LEX_SUDO_APPROVE=0` also skip the session
+  question; without a controlling TTY nothing changes (the question
+  fails → decline → old behaviour, deterministic). German
+  `sudo für diese ganze Sitzung freigeben? (y/N): `. Along the way the
+  old error in the `/help` text "LEX_SUDO_APPROVE=0 (default)" was
+  corrected — the default is 1. **Tests +12 → 750** (13 runners,
+  DE+EN green): 8 gate/anchor checks in `test_features` + 4 PTY E2E
+  checks in `test_input` (fake `sudo` in PATH logs the calls, exactly
+  1× session question in the transcript).
+
+### Fixed 2026-10-05 — Ctrl+C killed lex + session permissions umask-dependent (step 51)
+
+- **Ctrl+C ended the entire lex process**: there was no `trap … INT` —
+  both in a turn and at the prompt (live finding: session `125104`, the
+  user stopped the AnonOps run and lex was completely dead). Now:
+  `_sigint()`-trap (lex:3255) — in a turn only `_turn_aborted=1`,
+  `run_turn` aborts at the abort points (loop top / after `call_api` /
+  tool loop), all open `tool_call` IDs get their protocol-consistent
+  marking answer (`_abort_turn_tools`), a hanging user message is
+  answered via `_abort_turn_note`; at the prompt: 1st Ctrl+C discards
+  the line, 2nd press ≤2 s = `Bye!`, Ctrl+D stays EOF (distinguished
+  via `rc>128 || _int_seen`).
+- **`timeout` survived tty Ctrl+C**: the child chain sits in its own
+  process group — the turn continued until `tool_timeout` (measured
+  20 s instead of 2 s). Fix: `timeout --foreground` in `_run_limited`
+  (rc=124 timer still checked, `_have_tf` cache, fallback without
+  support).
+- **Session permissions umask-dependent**: new sessions came out as
+  775/664 (finding: session 125104). Now: `session_init`/`install_lex`
+  — `sessions/` + folder `700`, `session.jsonl` via `: >` before the
+  first line + `600`; existing sessions fixed up.
+- **Diagnosis included (user question "why was there no sudo prompt?")**:
+  NOPASSWD:ALL active → sudo never asks for a password, only y/N is the
+  question; all 11 long blocks of the run were sudo approvals
+  (~2 h 35 m ≈ 58 % of the session, incl. a 2 h Avahi stop); the real
+  blockers were Avahi/Tor-DNS/irssi permissions, not sudo.
+  **Tests +8 → 738** (13 runners, DE+EN green).
+
+### Fixed 2026-10-05 — visible y/N approval prompt (step 50)
+
+- **Approval question was invisible**: `_approve_request`/`_sudo_ask`
+  wrote the question **before** the command
+  (`printf 'Approve command (y/N): %s\n' "$cmd"`) — with multi-line sudo
+  commands `(y/N)` scrolled off screen, the user only saw the command end
+  + blinking cursor (live hang in the AnonOps-Tor run, progress only via
+  manual TIOCSTI `y` injection). Now: `_tty_preview_text()`/`_tty_preview()`
+  — title + command truncated (200 B, `LC_ALL=C`, `…(+N bytes)`) above the
+  question, then `allow? (y/N): ` **without newline** as the last line
+  (cursor behind it); `_sudo_ask` analogously, last lex line
+  `enter sudo password now:`. Behaviour (y/j), gate and `/autosudo`
+  unchanged; ported 1:1 to DE. **Tests +2 → 730** (13 runners, DE+EN green).
 
 ### Changed 2026-10-05 — anti-refusal guard for the lexpen mode (step 49)
 

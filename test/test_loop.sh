@@ -170,6 +170,58 @@ else
 fi
 _max_nudges=4
 
+# 11. Fail memory / loop guard (step 54, §6 #38): the same tool call pair
+#     three times in a row (args AND result identical) → soft nudge, on the
+#     second time a hard stop. Tool: bash echo fixed — the result is
+#     byte-identical.
+same() {
+  printf '%s\n' \
+    '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"'$1'","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo fixed\"}"}}]}}]}'
+}
+mock="$TMP/loop_guard.json"
+same t1 > "$mock"; same t2 >> "$mock"; same t3 >> "$mock"
+printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Done.","tool_calls":[]}}]}' >> "$mock"
+_mock_file="$mock"
+_max_turns=10
+run_turn "always the same" > "$TMP/out.txt" 2> "$TMP/err.txt"
+rc=$?
+out="$(cat "$TMP/out.txt")"
+err="$(cat "$TMP/err.txt")"
+assert "loop-guard (soft stage: turn continues)" "0" "$rc"
+assert "loop-guard (final answer arrives)" "Done." "$out"
+assert "loop-guard (nudge on stderr)" "1" "$([[ "$err" == *"Fail memory"* ]] && echo 1 || echo 0)"
+assert "loop-guard (wording three times identical)" "1" "$([[ "$err" == *"three times identically"* ]] && echo 1 || echo 0)"
+
+# hard: six identical batches → after the soft stage abort with rc 1
+same t1 > "$mock"; same t2 >> "$mock"; same t3 >> "$mock"
+same t4 >> "$mock"; same t5 >> "$mock"; same t6 >> "$mock"
+_mock_file="$mock"
+run_turn "six times the same" > "$TMP/out2.txt" 2> "$TMP/err2.txt"
+rc=$?
+err2="$(cat "$TMP/err2.txt")"
+if (( rc == 1 )); then
+  printf '  [PASS] loop-guard hard (rc=1)\n'
+else
+  printf '  [FAIL] loop-guard hard (rc=%s)\n' "$rc" >&2
+  FAIL=1
+fi
+assert "loop-guard hard (message)" "1" "$([[ "$err2" == *"identical again"* ]] && echo 1 || echo 0)"
+
+# LEX_LOOP_GUARD=off: guard off, the turn runs through to the final answer
+export LEX_LOOP_GUARD=off
+same t1 > "$mock"; same t2 >> "$mock"; same t3 >> "$mock"
+printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Keep going.","tool_calls":[]}}]}' >> "$mock"
+_mock_file="$mock"
+run_turn "without the guard" > "$TMP/out3.txt" 2> "$TMP/err3.txt"
+rc=$?
+out="$(cat "$TMP/out3.txt")"
+err3="$(cat "$TMP/err3.txt")"
+assert "loop-guard off (final answer)" "Keep going." "$out"
+assert "loop-guard off (no nudge)" "0" "$([[ "$err3" == *"Fail memory"* ]] && echo 1 || echo 0)"
+assert "loop-guard off (rc=0)" "0" "$rc"
+unset LEX_LOOP_GUARD
+_max_turns=20
+
 if (( FAIL > 0 )); then
   echo "FAILED: $FAIL test(s) in test_loop.sh" >&2
   exit 1

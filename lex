@@ -65,14 +65,143 @@ _abs_path() {
 }
 
 # Time limit for tool_bash — without `timeout` (BSD/macOS legacy) call directly.
+# --foreground (step 51): default `timeout` puts the child in its own process
+# group — tty Ctrl+C reached neither the child nor bash -c, the substitution
+# kept running until expiry (measured: 20 s instead of 2 s) and the turn abort
+# hung until tool_timeout. With --foreground the children die on tty-INT, the
+# handler runs immediately; the timer still works (rc=124 verified).
+#
+# Step 53 (2026-10-06, §6 #35): the output goes into ONE FILE, not into a
+# pipe. Before, the surrounding command substitution read until EOF — an
+# orphan holding the write side (reproduction: `script -c 'timeout … irssi'`
+# -> SIGTTIN -> state T -> PPID=1 orphan; measured 4×, 17.5–50 min) left lex
+# hanging with no deadline of its own. Evidence: opencode #32504 ("waits for
+# pipe EOF instead of process exit"), codey #65 ("timeout doesn't cover
+# stdout/stderr reads"). Second level: a watchdog across the whole process
+# chain, because `timeout` itself can hang (without --kill-after it waits for
+# stopped children; additionally `read -t` races, bug-bash 2021-02/msg00059 —
+# hence deadline AND chain, not just read -t).
+# Return value: the output is in $_rl_out (deliberately NOT on stdout — the
+# caller prints it itself), rc as function status.
+_have_tf=""
+_have_ka=""
+_rl_out=""
+_rl_pid=""
+_rl_hung=""
+
+# Terminate the process chain under $1. Collect the whole neighbourhood first,
+# then kill leaf to root — otherwise parents die before their children show up
+# in the ps list and grandchildren are missed.
+# Never lex itself ($$), never PID <= 1.
+_kill_tree() {
+  local root="$1" sig="${2:-TERM}" p c i
+  [[ "${root:-}" =~ ^[0-9]+$ ]] || return 0
+  (( root > 1 )) || return 0
+  [[ "$root" == "$$" ]] && return 0
+  local -a kt_all=("$root") kt_queue=("$root")
+  while (( ${#kt_queue[@]} > 0 )); do
+    p="${kt_queue[0]}"
+    kt_queue=("${kt_queue[@]:1}")
+    while read -r c; do
+      [[ -n "${c:-}" ]] || continue
+      [[ "$c" =~ ^[0-9]+$ ]] || continue
+      [[ "$c" == "$$" ]] && continue
+      # Cycle/double guard (PPID chains are acyclic, a ps race is not).
+      case " ${kt_all[*]} " in
+        *" $c "*) continue ;;
+      esac
+      kt_all+=("$c")
+      kt_queue+=("$c")
+    done < <(ps -eo pid=,ppid= 2>/dev/null | awk -v p="$p" '$2 == p { print $1 }')
+  done
+  for (( i=${#kt_all[@]}-1; i>=0; i-- )); do
+    kill "-$sig" -- "${kt_all[$i]}" 2>/dev/null || true
+  done
+  return 0
+}
+
 _run_limited() {
   local secs="$1"
   shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-  else
-    "$@"
+  local tf flag pid wd rc out hung=0 grace
+  _rl_out=""
+  _rl_pid=""
+  _rl_hung=""
+  [[ "${secs:-}" =~ ^[0-9]+$ ]] || secs="${_tool_timeout:-60}"
+  # Ctrl+C before the start: the child must not come up at all.
+  if [[ -n "${_turn_aborted:-}" ]]; then
+    return 130
   fi
+  tf="$(mktemp 2>/dev/null)"
+  if [[ -z "$tf" ]]; then
+    # Fallback without temp file: synchronous, no deadline (behaviour before step 53).
+    _rl_out="$("$@" </dev/null 2>&1)"
+    rc=$?
+    return "$rc"
+  fi
+  flag="$tf.hung"
+  if [[ -z "$_have_tf" ]]; then
+    if timeout --help 2>/dev/null | grep -q -- '--foreground'; then
+      _have_tf=1
+    else
+      _have_tf=0
+    fi
+    if timeout --help 2>/dev/null | grep -q -- '--kill-after'; then
+      _have_ka=1
+    else
+      _have_ka=0
+    fi
+  fi
+  local -a targs=()
+  [[ "$_have_ka" == "1" ]] && targs+=(-k 5)
+  [[ "$_have_tf" == "1" ]] && targs+=(--foreground)
+  targs+=("$secs")
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${targs[@]}" "$@" </dev/null >"$tf" 2>&1 &
+  else
+    "$@" </dev/null >"$tf" 2>&1 &
+  fi
+  pid=$!
+  _rl_pid="$pid"
+  # Watchdog: hard deadline secs+10 across the chain — only fires when neither
+  # timeout nor wait come back (stopped child, orphan with its own session).
+  # It fires ONLY while the child is still unburied: a child PID cannot be
+  # reused before we have waited here.
+  grace=$(( secs + 10 ))
+  (
+    sleep "$grace"
+    if [[ -d "/proc/$pid" ]]; then
+      : > "$flag"
+      _kill_tree "$pid" TERM
+      sleep 3
+      _kill_tree "$pid" KILL
+    fi
+  ) >/dev/null 2>&1 &
+  wd=$!
+  wait "$pid" 2>/dev/null
+  rc=$?
+  # Ctrl+C: the INT handler ran while we waited (rc > 128). A background job
+  # no longer gets SIGINT from the tty (bash sets it to "ignore" for async
+  # commands) — hence explicit here.
+  if [[ -n "${_turn_aborted:-}" ]]; then
+    _kill_tree "$pid" KILL
+    wait "$pid" 2>/dev/null
+    rc=130
+  fi
+  kill "$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  if [[ -s "$flag" ]]; then
+    hung=1
+    _rl_hung=1
+  fi
+  out="$(cat "$tf" 2>/dev/null)"
+  rm -f "$tf" "$flag"
+  if (( hung )); then
+    out+=$'\n'"Note: time limit (${secs}s) reached — the running process chain was terminated."
+    log "_run_limited: watchdog fired after $((secs + 10))s — child chain terminated"
+  fi
+  _rl_out="$out"
+  return "$rc"
 }
 
 # LEX_MOCK_FILE: shadow copy so the source file is not destroyed (bug #10).
@@ -105,6 +234,8 @@ _default_max_tokens=16384
 # produced finish=length aborts -> now 16384/8192.
 _default_reasoning_budget=8192
 _default_temperature=0.7
+# API retries (step 53, §6 #36): 0 = off, default 2 like the OpenAI SDK.
+_default_api_retries=2
 _default_max_turns=200
 _default_tool_timeout=300
 _default_tool_max_output=50000
@@ -129,6 +260,7 @@ _model=""
 _max_tokens=""
 _reasoning_budget=""
 _temperature=""
+_api_retries=""
 _max_turns=""
 _tool_timeout=""
 _tool_max_output=""
@@ -158,6 +290,7 @@ _last_prompt_tokens=""
 _last_completion_tokens=""
 _compact_count=0
 _compact_last=""
+_compact_warned=0
 
 # ---------------------------------------------------------------------------
 # Config (4 tiers)
@@ -172,6 +305,7 @@ _load_settings() {
   v="$(jq -r '.max_tokens // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _max_tokens="$v"
   v="$(jq -r '.reasoning_budget_tokens // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _reasoning_budget="$v"
   v="$(jq -r '.temperature // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _temperature="$v"
+  v="$(jq -r '.api_retries // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _api_retries="$v"
   v="$(jq -r '.max_turns // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _max_turns="$v"
   v="$(jq -r '.tool_timeout // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _tool_timeout="$v"
   v="$(jq -r '.tool_max_output // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _tool_max_output="$v"
@@ -180,6 +314,9 @@ _load_settings() {
   v="$(jq -r '.compact // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact="$v"
   v="$(jq -r '.compact_keep // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_keep="$v"
   v="$(jq -r '.compact_buffer // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_buffer="$v"
+  # Explicit 0: otherwise the last jq chain ends with status 1 when the key
+  # is missing (the normal case) — callers must be able to rely on it.
+  return 0
 }
 
 # Config values come from user input (P2, 2026-09-28): without this check a
@@ -216,6 +353,7 @@ load_config() {
   _max_tokens="$_default_max_tokens"
   _reasoning_budget="$_default_reasoning_budget"
   _temperature="$_default_temperature"
+  _api_retries="$_default_api_retries"
   _max_turns="$_default_max_turns"
   _tool_timeout="$_default_tool_timeout"
   _tool_max_output="$_default_tool_max_output"
@@ -236,6 +374,7 @@ load_config() {
   _max_tokens="${LEX_MAX_TOKENS:-$_max_tokens}"
   _reasoning_budget="${LEX_REASONING_BUDGET:-$_reasoning_budget}"
   _temperature="${LEX_TEMPERATURE:-$_temperature}"
+  _api_retries="${LEX_API_RETRIES:-$_api_retries}"
   _max_turns="${LEX_MAX_TURNS:-$_max_turns}"
   _tool_timeout="${LEX_TOOL_TIMEOUT:-$_tool_timeout}"
   _tool_max_output="${LEX_TOOL_MAX_OUTPUT:-$_tool_max_output}"
@@ -261,6 +400,10 @@ load_config() {
   _tool_max_output="$(_int_or "$_tool_max_output" "$_default_tool_max_output")"
   _max_nudges="$(_int_or "$_max_nudges" "$_default_max_nudges")"
   _temperature="$(_float_or "$_temperature" "$_default_temperature")"
+  _api_retries="$(_int_or "$_api_retries" "$_default_api_retries")"
+  # Cap: more than 10 retries would only slow-motion a dead server (and make
+  # every test take minutes).
+  (( _api_retries > 10 )) && _api_retries=10
   _ctx_limit="$(_int_or "$_ctx_limit" "$_default_ctx_limit")"
   _compact_keep="$(_int_or "$_compact_keep" "$_default_compact_keep")"
   _compact_buffer="$(_int_or "$_compact_buffer" "$_default_compact_buffer")"
@@ -278,11 +421,72 @@ load_config() {
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+# Redaction for every path that leaves lex (§6 #37). Covers the leak sites
+# found on 2026-10-06 (user password in ~/.lex/log/lex.log, in session.jsonl
+# and in wiki/log.md): the own API key literally and without a fork, a
+# prefilter so that ordinary log lines do not pay for a fork, then four sed
+# expressions (assignment forms, Bearer/Basic, token prefixes, URL
+# credentials).
+# The second alternative of the value group excludes quotes: otherwise the
+# pattern eats the closing quote of a JSON line (session_write) and the line
+# would no longer be valid JSON.
+# Trailing newlines are kept — $( … ) would strip them, and the line count in
+# _trace_result hangs on that (found 2026-10-06: "12 lines in total" became
+# 11 as soon as the output went through the redactor).
+# Call: _redact "$text" -> stdout.
+_redact() {
+  local t="${1:-}" trail="" out
+  [[ -z "$t" ]] && return 0
+  while [[ "$t" == *$'\n' ]]; do
+    trail+=$'\n'
+    t="${t%$'\n'}"
+  done
+  if [[ -z "$t" ]]; then
+    printf '%s' "$trail"
+    return 0
+  fi
+  out="$t"
+  # Own secret literally (API key from tier 1/4) — no fork.
+  if [[ -n "${_api_key:-}" && ${#_api_key} -ge 8 ]]; then
+    out="${out//$_api_key/<REDACTED-TOKEN>}"
+  fi
+  # Prefilter: start the sed chain only for candidate words — otherwise every
+  # log line would pay for a fork in the hot path.
+  case "$out" in
+    *[Pp]ass*|*[Ss]ecret*|*[Tt]oken*|*[Kk]ey*|*[Aa]uth*|*Bearer*|*://*@*|*sk-*|*xox*) ;;
+    *) printf '%s%s' "$out" "$trail"; return 0 ;;
+  esac
+  # The value group must stay JSON-safe (found by the live test 2026-10-06):
+  # an escaped quotation pair (\"…\") is swallowed as a WHOLE, open values
+  # exclude " and \. Otherwise the pattern eats the \ before the closing ",
+  # an unescaped " is left behind and the line in session.jsonl is no longer
+  # valid JSON (the live session broke exactly that way). Price: a value
+  # containing \ is only redacted up to the \ — better than broken JSONL.
+  out="$(printf '%s' "$out" | sed -E \
+    -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]]*[=:][[:space:]]*)(\\?"[^"\\]*\\?"|'"'"'[^'"'"']*'"'"'|[^[:space:],;)"'"'"'\\]+)/\1<REDACTED>/Ig' \
+    -e 's/(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{6,}/\1 <REDACTED>/Ig' \
+    -e 's/(^|[^[:alnum:]])(sk|pk|ghp|gho|ghu|ghs|glpat|xox[baprs]|github_pat)[-_][A-Za-z0-9_-]{6,}/\1<REDACTED-TOKEN>/g' \
+    -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://[^/:@[:space:]"\\]+):[^@[:space:]"\\]+@#\1:<REDACTED>@#g')"
+  printf '%s%s' "${out:-}" "$trail"
+}
+
+# Redact INTO the target variable (not $( … )): command substitutions strip
+# trailing newlines, and the line count in _trace_result plus the byte
+# identity of written files depend on them.
+# Call: _redact_var <variable name> "$text"
+_redact_var() {
+  local __rl
+  __rl="$(_redact "$2"; printf '\001')"
+  printf -v "$1" '%s' "${__rl%$'\001'}"
+}
+
 log() {
   local msg="$1"
   mkdir -p "$_log_dir" 2>/dev/null
   local ts
   ts="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  # Redaction at the one place where everything lands (§6 #37).
+  msg="$(_redact "$msg")"
   printf '%s %s\n' "$ts" "$msg" >> "${_log_dir}/lex.log" 2>/dev/null
 }
 
@@ -406,8 +610,10 @@ _system_prompt="${_prompt_style}${_prompt_ops}"
 # ---------------------------------------------------------------------------
 # /autosudo (audit finding §7.1, 2026-10-03): answer the y/N approval in the
 # sudo gate automatically — otherwise the run blocks per sudo command (two
-# hangs of 24/13 min in the step-45 run). Only the approval is automated;
-# password/TTY questions in _sudo_ask stay manual.
+# hangs of 24/13 min in the step-45 run). Since step 52 the gate asks only
+# ONCE per session (session grant); /autosudo on also skips that question.
+# Only approvals are automated; password/TTY questions in _sudo_ask stay
+# manual.
 #   /autosudo on|off   or LEX_AUTOSUDO=1 at startup; bare = status
 # ---------------------------------------------------------------------------
 cmd_autosudo() {
@@ -415,19 +621,19 @@ cmd_autosudo() {
   case "$what" in
     on|an|1)
       _autosudo=1
-      echo "✓ /autosudo on — y/N approvals in the sudo gate run automatically (password/TTY questions in _sudo_ask remain manual)."
+      echo "✓ /autosudo on — sudo runs without any question (neither session grant nor y/N; password/TTY questions in _sudo_ask remain manual)."
       log "cmd: /autosudo on"
       ;;
     off|aus|0)
       _autosudo=0
-      echo "✓ /autosudo off — sudo approvals ask y/N on the TTY again."
+      echo "✓ /autosudo off — the session grant returns at the next sudo (after a decline: y/N per command)."
       log "cmd: /autosudo off"
       ;;
     *)
       if [[ "${_autosudo:-0}" == "1" ]]; then
-        echo "  /autosudo: active (y/N approvals automatic)"
+        echo "  /autosudo: active (no questions at all)"
       else
-        echo "  /autosudo: inactive (y/N approval on the TTY)"
+        echo "  /autosudo: inactive (session grant at the 1st sudo, else y/N per command)"
       fi
       ;;
   esac
@@ -448,10 +654,18 @@ session_init() {
     0|false|no|off|"") return 0 ;;
   esac
   mkdir -p "${_lex_home}/sessions" 2>/dev/null || return 0
+  # Hard permissions (step 51): sessions/ came out as 775/664 depending on the
+  # caller's umask — a housekeeping-only chmod did not hold because every new
+  # session is created from scratch (finding 2026-10-05: session 125104 = 775).
+  chmod 700 "${_lex_home}/sessions" 2>/dev/null || true
   _session_id="$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
   local dir="${_lex_home}/sessions/${_session_id}"
   mkdir -p "$dir" 2>/dev/null || return 0
+  chmod 700 "$dir" 2>/dev/null || true
   _session_file="${dir}/session.jsonl"
+  # Create the file with mode 600 BEFORE the first line — by umask alone it
+  # ended up as 664.
+  : > "$_session_file" 2>/dev/null && chmod 600 "$_session_file" 2>/dev/null || true
   local ts project
   ts="$(date +%Y-%m-%dT%H:%M:%S%z)"
   project="$(basename "$PWD")"
@@ -461,7 +675,11 @@ session_init() {
 
 session_write() {
   [[ -n "${_session_file:-}" ]] || return 0
-  printf '%s\n' "$1" >> "$_session_file" 2>/dev/null
+  # §6 #37: session.jsonl is a documentation file (600) — secrets do not
+  # belong there, even if the model context needs them. One entry is exactly
+  # one jq -c line, so _redact can only hit between the quotes and cannot
+  # break the structure.
+  printf '%s\n' "$(_redact "$1")" >> "$_session_file" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -491,6 +709,18 @@ append_message_json() {
   rtf="$(mktemp)" || return 1
   if ! printf '%s' "$msg" > "$rtf" 2>/dev/null; then rm -f "$rtf"; return 1; fi
   if [[ -n "$reasoning" ]]; then
+    # P8 (step 56, §6 #38): hard cap on the STORED reasoning. Nothing enters
+    # $_messages (content + tool_calls only) — session.jsonl alone grows with
+    # it, by the full thinking text per turn. In the AnonOps case 2026-10-06
+    # that was >100 KB per turn; after a few turns the session was no longer
+    # readable. Character basis like _tool_max_output (consistent, not
+    # byte-exact).
+    local rs_max="${LEX_REASONING_STORE_MAX:-20000}"
+    [[ "$rs_max" =~ ^[0-9]+$ ]] || rs_max=20000
+    if (( ${#reasoning} > rs_max )); then
+      log "append_message_json: reasoning ${#reasoning} chars > cap $rs_max — session store capped"
+      reasoning="${reasoning:0:$rs_max}"$'\n… (reasoning capped at '"$rs_max"' chars — LEX_REASONING_STORE_MAX)'
+    fi
     rf="$(mktemp)" || { rm -f "$rtf"; return 1; }
     if ! printf '%s' "$reasoning" > "$rf" 2>/dev/null; then rm -f "$rtf" "$rf"; return 1; fi
     rec="$(jq -c -n --arg ts "$ts" --slurpfile m "$rtf" --rawfile r "$rf" \
@@ -663,6 +893,28 @@ _sse_to_response() {
     ' "$f"
 }
 
+# Backoff for API retries (step 53, §6 #36): the OpenAI SDK norm —
+# exponential from 0.8 s, ceiling 8 s, jitter ±25 % ($RANDOM is entropy
+# enough; `Retry-After` is deliberately not read, the local llama-server
+# never sends it and the header would only add another parsing spot).
+# Call: _retry_delay <attempt 1..n> -> e.g. "0.83".
+_retry_delay() {
+  local a="${1:-1}" base=800 ms jitter
+  case "$a" in
+    1) base=800 ;;
+    2) base=1600 ;;
+    3) base=3200 ;;
+    *) base=8000 ;;
+  esac
+  (( base > 8000 )) && base=8000
+  jitter=$(( RANDOM % ( base / 2 + 1 ) - base / 4 ))
+  ms=$(( base + jitter ))
+  # Ceiling 8 s also over the jitter: the norm names 8 s as maximum.
+  (( ms > 8000 )) && ms=8000
+  (( ms < 100 )) && ms=100
+  printf '%d.%02d' "$(( ms / 1000 ))" "$(( (ms % 1000) / 10 ))"
+}
+
 call_api() {
   local _rb="${_rb_override:-${_reasoning_budget:-10}}"
   _rb_override=""
@@ -719,27 +971,60 @@ call_api() {
 
   # -o writes the body away, -w delivers the HTTP status on STDOUT: both
   # stay measurable without the stream being read through a loop.
-  http_code="$(curl -sS --max-time "${LEX_API_TIMEOUT:-1800}" \
-      -o "$stream_tf" -w '%{http_code}' \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${_api_key:-}" \
-      -H "Accept: text/event-stream" \
-      -d @"$body_tf" "$url" 2>"$err_tf")"
-  rc=$?
+  # Step 53 (§6 #36): transport errors are RETRIED before the turn dies —
+  # the OpenAI SDK norm (429/5xx + curl network errors, max. 2 retries,
+  # backoff 0.8 → 8 s with jitter). Trigger for the fix: llama.cpp
+  # #21660/#22072 (500 parse_error.101 caused by special characters or size
+  # in tool args) — exactly the AnonOps case 2026-10-06 (column 54885 at
+  # 149.520 tokens), where lex gave up immediately.
+  local attempt=0 max_attempts delay_s retryable
+  max_attempts=$(( ${_api_retries:-2} + 1 ))
+  (( max_attempts >= 1 )) || max_attempts=1
+  while :; do
+    http_code="$(curl -sS --max-time "${LEX_API_TIMEOUT:-1800}" \
+        -o "$stream_tf" -w '%{http_code}' \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${_api_key:-}" \
+        -H "Accept: text/event-stream" \
+        -d @"$body_tf" "$url" 2>"$err_tf")"
+    rc=$?
+    retryable=0
+    if (( rc != 0 )); then
+      retryable=1
+    elif [[ "$http_code" == "429" || "$http_code" =~ ^5[0-9][0-9]$ ]]; then
+      retryable=1
+    fi
+    (( retryable )) || break
+    attempt=$(( attempt + 1 ))
+    if (( attempt >= max_attempts )) || [[ -n "${_turn_aborted:-}" ]]; then
+      break
+    fi
+    delay_s="$(_retry_delay "$attempt")"
+    log "call_api: attempt $attempt failed (HTTP ${http_code:-0} curl $rc) — retrying in ${delay_s}s (max $(( max_attempts - 1 )) retries)"
+    sleep "$delay_s"
+  done
   rm -f "$body_tf"
   if (( rc != 0 )); then
     local detail
     detail="$(tr -d '\r' <"$err_tf" | grep -v '^$' | tail -n1)"
-    echo "Error: request failed (curl rc=$rc${detail:+ — $detail})." >&2
-    log "call_api: curl rc=$rc url=$url"
+    echo "Error: request failed (curl rc=$rc${detail:+ — $detail}) after $attempt attempt(s)." >&2
+    log "call_api: curl rc=$rc url=$url attempts=$attempt"
     rm -f "$stream_tf" "$err_tf"
     return 1
   fi
   if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-    local snippet
-    snippet="$(head -c 200 "$stream_tf" | tr -d '\r\n')"
-    echo "Error: HTTP $http_code from the server${snippet:+ — $snippet}" >&2
-    log "call_api: HTTP $http_code"
+    # P6: log a body snippet — parse_error.101 names column and offset,
+    # without the snippet the server error is worthless in the log.
+    local snippet body_bytes
+    body_bytes="$(wc -c <"$stream_tf" | tr -d ' ')"
+    snippet="$(head -c 400 "$stream_tf" | tr -d '\r\n')"
+    echo "Error: HTTP $http_code from the server after $attempt attempt(s)${snippet:+ — $snippet}" >&2
+    case "$snippet" in
+      *parse_error*|*invalid\ string*|*unexpected*)
+        echo "Hint: the server JSON was invalid — usually special characters or size in tool args, or an over-long context. Shorten the context, run /compact or clean up the output." >&2
+        ;;
+    esac
+    log "call_api: HTTP $http_code bytes=$body_bytes attempts=$attempt snippet=$(printf '%s' "$snippet" | head -c 200)"
     rm -f "$stream_tf" "$err_tf"
     return 1
   fi
@@ -814,6 +1099,13 @@ tool_write_file() {
   local path="$1" content="$2"
   local resolved dir tmp mode
   resolved="$(safe_path "$path")" || return 1
+  # §6 #37: the wiki is documentation/log for humans — nothing secret belongs
+  # there, even if the model context still needs it. Configs, scripts and
+  # everything outside $_wiki_dir stays exactly as the model wrote it
+  # (otherwise the AnonOps task would break).
+  if [[ -n "${_wiki_dir:-}" && "$resolved" == "$_wiki_dir"/* ]]; then
+    _redact_var content "$content"
+  fi
   dir="$(dirname "$resolved")"
   if ! mkdir -p "$dir" 2>/dev/null; then
     echo "Error: cannot create directory '$dir'."
@@ -1085,11 +1377,31 @@ _bash_denied() {
   return 1
 }
 
+# TTY prompt helper (#50, 2026-10-05): show the command TRUNCATED above the
+# question — the question is the LAST line, otherwise the multi-line command
+# scrolls the (y/N) prompt off screen (hang: invisible approval question,
+# manual TIOCSTI injection needed). Behaviour (y/j = yes) stays unchanged.
+_tty_preview_text() {  # $1 = title, $2 = command; prints the display text to stdout
+  local LC_ALL=C title="$1" cmd="$2" one
+  one="$(printf '%s' "$cmd" | tr '\n' ' ' | tr -s ' ')"
+  if ((${#one} > 200)); then
+    one="${one:0:200} …(+${#cmd} bytes)"
+  fi
+  printf '── %s ─────────────\n  %s\n' "$title" "$one"
+}
+
+_tty_preview() {  # write the display text to the controlling TTY
+  _tty_preview_text "$1" "$2" > /dev/tty 2>&1 || return 1
+}
+
 # Opt-in approval (§6 #11): only with --approve/LEX_APPROVE=1 and a controlling TTY.
 _approve_request() {
   local cmd="$1" ans=""
   [[ -e /dev/tty ]] || return 1
-  printf 'Approve command (y/N): %s\n' "$cmd" > /dev/tty 2>/dev/null || return 1
+  _tty_preview "Approve command" "$cmd" || return 1
+  # Question line WITHOUT trailing \n: the cursor stays right behind (y/N) —
+  # visibly showing that lex is waiting for confirmation.
+  printf 'allow? (y/N): ' > /dev/tty || return 1
   IFS= read -r ans < /dev/tty || ans=""
   case "$ans" in
     y|Y|yes|YES|j|J|ja|JA) return 0 ;;
@@ -1098,14 +1410,22 @@ _approve_request() {
 }
 
 # ---------------------------------------------------------------------------
-# sudo gate (§6 #13) — a gate instead of a ban, ALWAYS EXACTLY ONE prompt:
+# sudo gate (§6 #13) — a gate instead of a ban, now with a session grant
+# (step 52, default):
 #   * no valid sudo ticket -> _sudo_ask(): show the command on the controlling
 #     TTY, then `sudo -v`. The password goes STRAIGHT to sudo — it never runs
 #     through lex (no variable, no log, tool_bash stdin stays
 #     </dev/null and is not used for sudo).
-#   * valid ticket           -> _approve_request() asks y/N.
+#   * valid ticket + first sudo of the session -> _sudo_grant_request():
+#     ONE question "allow sudo for this entire session?" — yes = everything
+#     runs without further questions, no = y/N per command afterwards
+#     (_approve_request). /autosudo on and LEX_SUDO_APPROVE=0 also skip the
+#     session question.
 # No controlling TTY -> refusal. LEX_SUDO=0 switches sudo off completely.
 # ---------------------------------------------------------------------------
+# Session grant per lex session (process state, not a config key):
+#   "" = not asked yet, "1" = granted, "0" = declined (y/N per command)
+_sudo_grant=""
 _sudo_gate_reason=""
 _needs_sudo() {
   local c
@@ -1130,13 +1450,37 @@ _sudo_ticket_valid() {
 _sudo_ask() {
   local cmd="$1"
   _tty_ok || return 1
-  printf 'lex needs root rights for:\n  %s\n' "$cmd" > /dev/tty 2>&1 || return 1
+  _tty_preview "lex needs root rights for" "$cmd" || return 1
+  printf 'enter sudo password now:\n' > /dev/tty || return 1
   # sudo reads the password itself over the controlling TTY (explicit input),
   # the message goes to stderr = terminal. Deliberately NO `>` here: such
   # file redirections are applied by the calling shell, not sudo (warning SC2024
   # would be legitimate here).
   sudo -v < /dev/tty || return 1
   _sudo_ticket_valid
+}
+
+# Session grant (step 52): ONE question per session instead of y/N per
+# command — visible answer, no \n, abortable with Ctrl+C (steps 50/51).
+_sudo_grant_request() {
+  local cmd="$1" ans=""
+  [[ -e /dev/tty ]] || return 1
+  _tty_preview "lex needs root rights for" "$cmd" || return 1
+  printf 'allow sudo for this entire session? (y/N): ' > /dev/tty || return 1
+  IFS= read -r ans < /dev/tty || ans=""
+  case "$ans" in
+    y|Y|yes|YES|j|J|ja|JA) return 0 ;;
+  esac
+  return 1
+}
+
+# Display state of the session grant for /status.
+_sudo_grant_state() {
+  case "${_sudo_grant:-}" in
+    1) printf 'granted' ;;
+    0) printf 'declined' ;;
+    *) printf 'open' ;;
+  esac
 }
 
 _sudo_gate() {
@@ -1159,7 +1503,25 @@ _sudo_gate() {
   if [[ "${_autosudo:-0}" == "1" ]]; then
     return 0
   fi
-  if [[ "${_sudo_approve:-1}" == "1" ]] && ! _approve_request "$cmd"; then
+  if [[ "${_sudo_approve:-1}" != "1" ]]; then
+    return 0
+  fi
+  # Session grant (step 52, default): ask only at the first sudo, then run
+  # without further questions for this session. "No" sticks for the session
+  # and y/N is asked per command afterwards (the pre-step-52 path).
+  if [[ "${_sudo_grant}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${_sudo_grant}" == "" ]]; then
+    if _sudo_grant_request "$cmd"; then
+      _sudo_grant="1"
+      log "sudo: session grant given"
+      return 0
+    fi
+    _sudo_grant="0"
+    log "sudo: session grant declined — per-command y/N"
+  fi
+  if ! _approve_request "$cmd"; then
     _sudo_gate_reason="no approval granted"
     return 1
   fi
@@ -1189,7 +1551,13 @@ tool_bash() {
     log "tool: bash without approval"
     return 1
   fi
-  output="$(_run_limited "${_tool_timeout:-60}" bash -c "$command" </dev/null 2>&1)"; rc=$?
+  # Step 53: no command substitution — the substitution read until EOF and
+  # hung as long as an orphan held the pipe (§6 #35).
+  # _run_limited puts the output into $_rl_out, the child chain runs with its
+  # own deadline in the background (file instead of pipe).
+  _run_limited "${_tool_timeout:-60}" bash -c "$command"
+  rc=$?
+  output="$_rl_out"
   # Full output (2026-09-30): truncation only centrally in run_turn (spill).
   if (( rc != 0 )); then
     printf 'Exit code: %s\n%s\n' "$rc" "$output"
@@ -1255,6 +1623,13 @@ tool_append_file() {
   local path="$1" content="$2"
   local resolved dir
   resolved="$(safe_path "$path")" || return 1
+  # §6 #37: the wiki is documentation/log for humans — nothing secret belongs
+  # there, even if the model context still needs it. Configs, scripts and
+  # everything outside $_wiki_dir stays exactly as the model wrote it
+  # (otherwise the AnonOps task would break).
+  if [[ -n "${_wiki_dir:-}" && "$resolved" == "$_wiki_dir"/* ]]; then
+    _redact_var content "$content"
+  fi
   dir="$(dirname "$resolved")"
   if ! mkdir -p "$dir" 2>/dev/null; then
     echo "Error: cannot create directory '$dir'."
@@ -2503,6 +2878,8 @@ _spin_stop() {
 _trace_result() {
   _trace_enabled || return 0
   local name="${1:-}" res="${2:-}"
+  # Display path (§6 #37) — the model context keeps the original.
+  _redact_var res "$res"
   local max_lines=8 max_chars=600 n=0 line out="" total
   [[ -z "${res//[$' \t\n']/}" ]] && return 0
   total="$(printf '%s' "$res" | wc -l | tr -d ' ')"
@@ -2530,6 +2907,8 @@ _trace_reasoning() {
   local r="${1:-}" max line
   max="$(_int_or "${LEX_REASONING_MAX:-4000}" 4000)"
   (( max >= 1 )) || max=4000
+  # Display path (§6 #37): reasoning dumps were one of the two leak sites.
+  r="$(_redact "$r")"
   [[ -z "${r//[$' \t\n']/}" ]] && return 0
   if (( ${#r} > max )); then
     r="${r:0:max}"$'\n… (truncated — raise LEX_REASONING_MAX, set LEX_SHOW_REASONING=0 to switch off)'
@@ -2582,13 +2961,18 @@ _trace_hud() {
 # pipe tables (opencode style: header cyan/bold, grid dim, numbers right-aligned).
 # Colour only with TTY (or force), otherwise pass through raw.
 _md_render() {
-  local force="$1"
+  local force="$1" buf=""
+  # Display path (§6 #37): what GOES ONTO THE SCREEN is redacted — the model
+  # context stays untouched. read -d '' reads to EOF and keeps internal +
+  # trailing newlines (a cat replacement without a fork).
+  IFS= read -r -d '' buf || true
+  _redact_var buf "$buf"
   # NO_COLOR/TERM=dumb also wins over force (standard convention).
   if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" || ( "$force" != "force" && ! -t 1 ) ]]; then
-    cat
+    printf '%s' "$buf"
     return 0
   fi
-  LC_ALL=C awk '
+  printf '%s' "$buf" | LC_ALL=C awk '
     BEGIN {
       code = 0
       ESC = sprintf("%c", 27)
@@ -2903,6 +3287,12 @@ _compact_prompt() {
   fi
   cat <<'EOF'
 
+Pinning — always carry these points into the new structure, even if the history only mentions them in passing:
+- the user's task (verbatim, language, repo/folder boundaries, prohibitions)
+- running plans/TODO lists with their current state (which step is in progress, what is still open)
+- open decisions with their reasoning — "Done" only counts for what the history actually confirmed
+- paths, commands, error messages and error IDs that a later step still needs
+
 Output EXACTLY this Markdown structure, keep the order, keep all sections, dry bullet points instead of prose, preserve exact paths/commands/error messages. Do not mention the summary or compaction. Answer in English.
 
 ## Goal
@@ -2933,11 +3323,29 @@ _compact_run() {
   local force="${1:-}" t0 est_before est_thr rest rest_start=1 has_sum=0
   t0="$(_ms_now)"
   if [[ "$force" != "force" ]]; then
-    [[ "${_compact:-on}" == "on" ]] || return 0
     [[ "${_ctx_limit:-0}" =~ ^[0-9]+$ ]] && (( _ctx_limit > 0 )) || return 0
   fi
   est_before="$(_compact_estimate)"
   est_thr="$(_compact_threshold)"
+  # P7 (step 55, §6 #38): warning at 85 % context. The gap between the 85 %
+  # mark and the compaction threshold (ctx − max(max_tokens, buffer)) is the
+  # window where the context is already full but not yet rebuilt — exactly
+  # where the AnonOps case showed up. Independent of auto-compaction
+  # (LEX_COMPACT=off must not silence the warning): once per "nearly full"
+  # period, so the turn is not spammed.
+  if [[ "$force" != "force" ]]; then
+    local warn_thr=$(( _ctx_limit * 85 / 100 ))
+    if (( est_before > warn_thr )); then
+      if [[ "${_compact_warned:-0}" != "1" ]]; then
+        _compact_warned=1
+        echo "⚠️  Context $(( est_before * 100 / _ctx_limit )) % full (about $(( est_before )) of $_ctx_limit tokens) — auto compaction kicks in at $(( est_thr ))." >&2
+        log "compact: warning pct=$(( est_before * 100 / _ctx_limit )) est=$est_before ctx=$_ctx_limit thr=$est_thr"
+      fi
+    else
+      _compact_warned=0
+    fi
+    [[ "${_compact:-on}" == "on" ]] || return 0
+  fi
   if [[ "$force" != "force" ]] && (( est_before <= est_thr )); then
     return 0
   fi
@@ -3197,9 +3605,60 @@ _rep_detect() {
 # ---------------------------------------------------------------------------
 # Agent-Loop
 # ---------------------------------------------------------------------------
+# Ctrl+C (step 51): abort the turn, the REPL stays alive. Before there was
+# NO trap … INT — a single Ctrl+C ended the whole lex process (live finding
+# 2026-10-05, session 125104, run 12:51–17:16: the user wanted to abort the
+# stuck sudo/tool loop and lex was dead instantly).
+# Behavior: during a turn → let the running child die (tty-INT goes to the
+# whole process group), catch the turn cleanly; at the prompt → first press
+# discards only the line, second press ≤2 s ends lex (otherwise /exit or
+# Ctrl+D). Without a trap the handler runs AFTER the interrupted read/child —
+# that is why every abort site checks the _turn_aborted flag itself.
+_sigint() {
+  if [[ -n "${_turn_active:-}" ]]; then
+    _turn_aborted=1
+    return 0
+  fi
+  _int_seen=1
+  if [[ -n "${_int_last:-}" ]] && (( SECONDS - _int_last <= 2 )); then
+    printf '\n'
+    echo "Bye! 👋"
+    exit 0
+  fi
+  _int_last="$SECONDS"
+}
+
+# Ctrl+C in the middle of a tool batch: the OpenAI protocol requires a
+# tool response for EVERY tool_call — without one the context is broken on
+# the next turn. So answer all remaining calls from index i with a marker.
+_abort_turn_tools() {
+  local i="$1" count="$2" tcs="$3" j tcj idj
+  for (( j=i; j<count; j++ )); do
+    tcj="$(jq ".[$j]" <<< "$tcs" 2>/dev/null)"
+    idj="$(jq -r '.id // empty' <<< "$tcj" 2>/dev/null)"
+    append_tool_message "$idj" "(Turn aborted via Ctrl+C — tool not executed.)"
+  done
+  log "run_turn: Ctrl+C — turn aborted (tool $((i + 1))/$count)"
+  echo "Turn aborted (Ctrl+C). REPL stays open — session saved."
+}
+
+# Abort without tool_calls (before/after call_api): the dangling user
+# message needs an answer, otherwise two user messages would stand in a row.
+_abort_turn_note() {
+  append_message "assistant" "(Turn aborted via Ctrl+C.)"
+  log "run_turn: Ctrl+C — turn aborted"
+  echo "Turn aborted (Ctrl+C). REPL stays open — session saved."
+}
+
 run_turn() {
   local input="$1" turn_t0 nudge_count=0 rep_nudges=0 pending="" _dtf="" rlen _spill=""
+  # Fail memory (step 54, §6 #38): the same tool call three times in a row
+  # (name + args + identical result) → first a soft nudge, then a hard stop.
+  # Signature/window live only inside the turn.
+  local _loop_last_sig="" _loop_run=0 _loop_hits=0 _loop_violation=0 _loop_sig=""
   turn_t0="$(_now)"
+  _turn_active=1
+  _turn_aborted=""
   # Compaction (step 42) ONLY here: before the user-append the
   # tool pairs are always closed; auto = threshold as gate, silent.
   _compact_run
@@ -3207,6 +3666,11 @@ run_turn() {
   log "turn: ${#input} chars"
   local turns=0
   while :; do
+    # Ctrl+C before the first call_api (e.g. during compaction/append).
+    if [[ -n "${_turn_aborted:-}" ]]; then
+      _abort_turn_note
+      return 0
+    fi
     turns=$((turns + 1))
     if (( turns > _max_turns )); then
       # rescue logic here too (live re-test 2026-09-29: 578 bytes fell
@@ -3231,6 +3695,12 @@ run_turn() {
     # reasoning_budget=0 (review finding 2026-09-29).
     _rb_override=""
     _spin_stop
+    # Ctrl+C during the API call (curl died with it — rc would look like a
+    # spurious API error; the message would be misleading).
+    if [[ -n "${_turn_aborted:-}" ]]; then
+      _abort_turn_note
+      return 0
+    fi
     if (( _api_rc != 0 )); then
       # call_api names reason and rc itself (curl rc, HTTP code, jq) — here
       # only rc and a log line, so the error stays findable.
@@ -3379,6 +3849,11 @@ run_turn() {
     fi
     local i tc name args tci result
     for (( i=0; i<tool_count; i++ )); do
+      # Ctrl+C between the tool_calls (flag from the _sigint handler).
+      if [[ -n "${_turn_aborted:-}" ]]; then
+        _abort_turn_tools "$i" "$tool_count" "$tool_calls_json"
+        return 0
+      fi
       tc="$(jq ".[$i]" <<< "$tool_calls_json" 2>/dev/null)"
       name="$(jq -r '.function.name' <<< "$tc" 2>/dev/null)"
       args="$(jq -r '.function.arguments // empty' <<< "$tc" 2>/dev/null)"
@@ -3396,6 +3871,12 @@ run_turn() {
         rm -f "$_dtf"
       else
         result="$(dispatch_tool "$name" "$args" 2>&1)"
+      fi
+      # Ctrl+C during the tool run (child dead, result discarded) — the rest
+      # of the batch is answered with a marker to stay protocol-conform.
+      if [[ -n "${_turn_aborted:-}" ]]; then
+        _abort_turn_tools "$i" "$tool_count" "$tool_calls_json"
+        return 0
       fi
       # central cap (new 2026-09-30): the result is NEVER lost again.
       # Via _tool_max_output the full text is spilled and the context
@@ -3415,7 +3896,48 @@ run_turn() {
       _trace_result "$name" "$result"
       log "tool: $name"
       append_tool_message "$tci" "$result"
+      # Fail memory (step 54, §6 #38): signature from name, arguments and the
+      # first 200 bytes of the RESULT. Result in the hash = only an identical
+      # result counts as standstill; if the result changes (file grows, status
+      # flips) the counter resets. Evaluated after the batch — injecting a user
+      # message in the middle would break the protocol
+      # (assistant → tool → …).
+      if [[ "${LEX_LOOP_GUARD:-on}" != "off" ]]; then
+        _loop_sig="$(printf '%s\037%s\037%s' "$name" "$args" "${result:0:200}" \
+          | cksum 2>/dev/null | cut -d' ' -f1)"
+        if [[ -n "$_loop_sig" && "$_loop_sig" == "$_loop_last_sig" ]]; then
+          _loop_run=$(( _loop_run + 1 ))
+        else
+          _loop_last_sig="${_loop_sig:-}"
+          _loop_run=1
+        fi
+        (( _loop_run >= 3 )) && _loop_violation=1
+      fi
     done
+    # Violation handling: soft (nudge, turn continues) → hard (rc 1).
+    if (( _loop_violation )); then
+      _loop_violation=0
+      local loop_tool
+      loop_tool="$(jq -r '[.[] | .function.name] | join(",")' <<< "$tool_calls_json" 2>/dev/null)"
+      if (( _loop_hits == 0 )); then
+        _loop_hits=1
+        _loop_run=0
+        echo "⚠️  Fail memory: ${loop_tool:-tool} ran three times identically (args AND result) — nudge." >&2
+        log "run_turn: loop-guard nudge tools=${loop_tool:-?} run=$_loop_run"
+        session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+          --arg tools "${loop_tool:-}" --argjson run "$_loop_run" \
+          '{type:"loop_guard",ts:$ts,tools:$tools,action:"nudge",run:$run}')"
+        append_message "user" "The same tool result came three times identically: ${loop_tool:-tool} did not change. Repeat NOTHING: change the method or close the task in one sentence — sending the same arguments again changes nothing."
+        _rb_override=0
+        continue
+      fi
+      echo "❌ Fail memory: ${loop_tool:-tool} identical again — aborting (LEX_LOOP_GUARD=off switches this off)." >&2
+      log "run_turn: loop-guard hard tools=${loop_tool:-?} hits=$_loop_hits"
+      session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+        --arg tools "${loop_tool:-}" --argjson hits "$_loop_hits" \
+        '{type:"loop_guard",ts:$ts,tools:$tools,action:"abort",hits:$hits}')"
+      return 1
+    fi
   done
 }
 
@@ -3474,8 +3996,8 @@ cmd_status() {
   printf '  api       : %s\n' "${_api_url:-?}"
   printf '  budget    : %s  max_tokens: %s  temp: %s  max_turns: %s\n' \
     "${_reasoning_budget:-?}" "${_max_tokens:-?}" "${_temperature:-?}" "${_max_turns:-?}"
-  printf '  tools     : timeout %ss, max_output %s, nudges %s, approve: %s, sudo: %s, autosudo: %s\n' \
-    "${_tool_timeout:-?}" "${_tool_max_output:-?}" "${_max_nudges:-?}" "${_approve}" "${_sudo}" "${_autosudo:-0}"
+  printf '  tools     : timeout %ss, max_output %s, nudges %s, approve: %s, sudo: %s, autosudo: %s, grant: %s\n' \
+    "${_tool_timeout:-?}" "${_tool_max_output:-?}" "${_max_nudges:-?}" "${_approve}" "${_sudo}" "${_autosudo:-0}" "$(_sudo_grant_state)"
   printf '  session   : %s (%s stored sessions)\n' "$sess_state" "$sessions"
   printf '  mem       : %s (%s entries)\n' "$_mem_dir" "$mem_entries"
   printf '  wiki      : %s%s\n' "$_wiki_dir" "$([[ -d "$_wiki_dir" ]] && echo '' || echo '  (missing, fetch creates it)')"
@@ -3579,14 +4101,32 @@ agent_loop() {
   fi
   server_hint
   _hist_init
+  # Ctrl+C (step 51): only abort the turn, lex stays open — without a trap
+  # SIGINT killed the whole process (finding 2026-10-05, session 125104).
+  trap '_sigint' INT
   _prompt
   while [[ -t 0 ]]; do
-    local input
+    local input rc
     # -e = readline (arrows/history/tab), only when stdin is a terminal
+    # rc-based instead of ||: Ctrl+C must stay distinguishable from EOF
+    # (Ctrl+D, rc=1) — otherwise every Ctrl+C at the prompt ended the REPL
+    # (order case where the handler runs only AFTER the compound).
+    _int_seen=""
     if [[ -t 0 ]]; then
-      IFS= read -e -r input || return 0
+      IFS= read -e -r input
+      rc=$?
     else
-      IFS= read -r input || return 0
+      IFS= read -r input
+      rc=$?
+    fi
+    if (( rc != 0 )); then
+      if (( rc > 128 )) || [[ -n "${_int_seen:-}" ]]; then
+        # ^C was already mirrored into the terminal by the kernel (ECHOCTL).
+        printf '\n'
+        _prompt
+        continue
+      fi
+      return 0
     fi
     # prompt guarantee (finding 2026-10-03, user report "after tasks only a
     # blinking cursor"): readline clears the input line on Enter — with empty
@@ -3613,7 +4153,7 @@ agent_loop() {
       # /exit cost a complete request, the model answered
       # "Good. …" and the REPL stayed open).
       /exit|/quit) break ;;
-      *)       run_turn "$input" ;;
+      *)       run_turn "$input"; _turn_active="" ;;
     esac
     # spinner hard to rest before the prompt: even if `kill` did not take
     # (finding 2026-10-03), the flag gate (below in the loop) removes the
@@ -3653,6 +4193,7 @@ oneshot() {
 # ---------------------------------------------------------------------------
 install_lex() {
   mkdir -p "${_lex_home}/log" "${_lex_home}/sessions" "${_lex_home}/mem" "${_lex_home}/hooks" "${_lex_home}/agents" "${_lex_home}/skills" "${_lex_home}/prompts"
+  chmod 700 "${_lex_home}/sessions" 2>/dev/null || true
   if [[ ! -f "${_lex_home}/settings.json" ]]; then
     cat > "${_lex_home}/settings.json" <<EOF
 {
@@ -3888,17 +4429,20 @@ Security:
   reboots) — that always applies. --approve additionally asks before each run.
   sudo is not a ban but a gate (§6 #13): without a valid sudo ticket
   EXACTLY ONE prompt appears on the terminal with the command, the
-  password goes straight to sudo; with a valid ticket y/N is asked. Without
-  terminal there is no sudo run. LEX_SUDO=0 blocks sudo completely,
-  LEX_SUDO_APPROVE=0 drops the y/N question for a valid ticket (default).
-  /autosudo on (or LEX_AUTOSUDO=1) switches the same approval live without
-  restart — mode for unattended runs; _sudo_ask password prompts stay.
+  password goes straight to sudo; with a valid ticket lex asks ONCE per
+  session "allow sudo for this entire session? (y/N)" and sudo runs
+  without further questions afterwards (answer no = y/N per command).
+  Without terminal there is no sudo run. LEX_SUDO=0 blocks sudo
+  completely, LEX_SUDO_APPROVE=0 drops every approval question.
+  /autosudo on (or LEX_AUTOSUDO=1) also skips the session question —
+  mode for unattended runs; _sudo_ask password prompts stay.
 
 Config (4 tiers, ENV overrides):
   defaults -> ~/.lex/settings.json -> .lex/settings.json -> ENV
   ENV: LEX_API_URL, LEX_API_KEY, LEX_MODEL, LEX_MAX_TOKENS, LEX_REASONING_BUDGET,
        LEX_TEMPERATURE, LEX_MAX_TURNS, LEX_TOOL_TIMEOUT, LEX_TOOL_MAX_OUTPUT,
        LEX_CTX_LIMIT, LEX_COMPACT, LEX_COMPACT_KEEP, LEX_COMPACT_BUFFER,
+       LEX_API_RETRIES, LEX_LOOP_GUARD, LEX_REASONING_STORE_MAX,
        LEX_LOG_DIR, LEX_MOCK, LEX_MOCK_FILE, LEX_APPROVE, LEX_SUDO, LEX_SUDO_APPROVE,
        LEX_AUTOSUDO,
        LEX_SESSION, LEX_MEM_DIR,
