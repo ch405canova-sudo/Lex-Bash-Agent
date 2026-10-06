@@ -123,7 +123,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 
 | | |
 |---|---|
-| **Binary** | `lex` (one script, 4212 lines) |
+| **Binary** | `lex` (one script, 4569 lines) |
 | **Backend** | local llama-server, OpenAI protocol, `http://127.0.0.1:8080/v1/chat/completions` |
 | **Model** | `Ternary-Bonsai-2-27B-PQ2_0.gguf` (alias=`--alias` possible) |
 | **Language** | English-first — system prompt, docs, answers |
@@ -202,7 +202,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 ### Tree (status 2026-10-01)
 ```
 <repo>/
-├── lex                        ✅ 4568 lines, shellcheck-clean
+├── lex                        ✅ 4569 lines, shellcheck-clean
 ├── LEX.md                     ✅ this document
 ├── README.md                  ✅
 ├── CHANGELOG.md               ✅
@@ -260,7 +260,7 @@ An **own, pure-Bash LLM terminal agent** — pure Bash + `jq` + `curl`, no Node/
 
 ---
 
-## 5. Architecture of the script (`lex`, 4568 lines, status 2026-10-06)
+## 5. Architecture of the script (`lex`, 4569 lines, status 2026-10-06)
 
 | Function | Line | Task |
 |---|---|---|
@@ -805,12 +805,12 @@ How does Bash count tokens (no tokenizer)? ~~When does compaction kick in?~~ **�
 | Path | Content |
 |---|---|
 | `LEX.md` | **this file — the single source of truth** |
-| `lex` | the script (4212 lines, 17 tools) |
+| `lex` | the script (4569 lines, 17 tools) |
 | `README.md` / `CHANGELOG.md` / `LICENSE` | docs + MIT license (2026-09-28) |
 | `ai.sh` | llama-server manager (path-free, env-driven) |
 | `install.sh` | interactive installer (deps → `lex --install` → symlinks) |
 | `.github/workflows/ci.yml` | CI: `bash -n` + shellcheck + `run_all.sh` + hygiene |
-| `.git/` | commits `46c64c0`/`1faafaf`/`9c3f4e9` (v0.1.0), `5022bbf` (proxy), `e02d124` (wiki steps 1–5), `06e82a9` (steps 6–10 + docs), `3817ebe` (todo session-independent + lex symlink), `4aff4e9` (step 13 readability), `905a0fc` (step 14 code review P1–P3 + palette), `76b25b3` (§11 git status), `4d1f77b` (step 15 anti-doubt prompt), `a3c8224` (§11 git status) and `2e3f7dd` (step 16 workflow fixes nudge/rescue/spinner/defaults), `88658a2` (max-turns rescue) and `97195e9` (step 17+17b wiki learning + E2BIG context protection), `ca9be2a` (step 18 persona/H-Tools), `9b3ea4e` (step 19 security playbook), `38bcb8b` (step 20 playbook method), `7dc88da` (step 22 browser/Playwright) and `edd7c52` (step 23 generic mcp tool) as well as step 24 (desktop computer-use-linux) and `6e3c36c` (steps 36–38: streaming/testboden/limits, `lex` + 3 new tests + docs), `778474f` (§11 git status) and `9dc785f` (steps 39–42: compaction + HUD, `/exit`/usage fix, over-refusal prompt, live verify `/4`→`/3`, +96 → 669) and `b0658dc` (step 43 `/lexpen` prompt mode + step 44 pentest DB docs, +22 → 691); later: `1042a83`/`816675b`/`a4049e2` (steps 48–49: ops-layer split, glue fix, anti-refusal guard, → 728); **not committed: steps 50+51+52** (y/N preview + Ctrl+C abort & session permissions + session grant → 730+8+12 = 750, `LEX.md`/`CHANGELOG.md`/`lex`/tests modified, commit order open) — repo stays local without remote | |
+| `.git/` | commits `46c64c0`/`1faafaf`/`9c3f4e9` (v0.1.0), `5022bbf` (proxy), `e02d124` (wiki steps 1–5), `06e82a9` (steps 6–10 + docs), `3817ebe` (todo session-independent + lex symlink), `4aff4e9` (step 13 readability), `905a0fc` (step 14 code review P1–P3 + palette), `76b25b3` (§11 git status), `4d1f77b` (step 15 anti-doubt prompt), `a3c8224` (§11 git status) and `2e3f7dd` (step 16 workflow fixes nudge/rescue/spinner/defaults), `88658a2` (max-turns rescue) and `97195e9` (step 17+17b wiki learning + E2BIG context protection), `ca9be2a` (step 18 persona/H-Tools), `9b3ea4e` (step 19 security playbook), `38bcb8b` (step 20 playbook method), `7dc88da` (step 22 browser/Playwright) and `edd7c52` (step 23 generic mcp tool) as well as step 24 (desktop computer-use-linux) and `6e3c36c` (steps 36–38: streaming/testboden/limits, `lex` + 3 new tests + docs), `778474f` (§11 git status) and `9dc785f` (steps 39–42: compaction + HUD, `/exit`/usage fix, over-refusal prompt, live verify `/4`→`/3`, +96 → 669) and `b0658dc` (step 43 `/lexpen` prompt mode + step 44 pentest DB docs, +22 → 691); later: `1042a83`/`816675b`/`a4049e2` (steps 48–49: ops-layer split, glue fix, anti-refusal guard, → 728) and `2ed364c` (steps 50–56: y/N preview + Ctrl+C abort & session permissions + session grant + fix package hang/500/redaction/fail-guard, +63 → 791, working tree clean) — **not pushed** (order open); DE twin `/home/chaos/Ai/lex` has the same content as `955f441` | |
 | `tools/llama-proxy.sh` | **debug proxy** (`start\|stop\|status\|tail\|show`) |
 | `test/run_all.sh` | test runners (**13 runners**: testboden/syntax/input/tools/loop/http/features/proxy/sse/eval/limits/compaction/repetition, green) |
 | `test/test_input.sh` … `test_repetition.sh` | 11 test files, **791 checks** (791 individual + 13 runner marks) |

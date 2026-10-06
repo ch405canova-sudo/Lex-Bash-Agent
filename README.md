@@ -463,7 +463,7 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 4212 lines, 17 tools
+lex              the agent — one file, 4569 lines, 17 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)
