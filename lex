@@ -4772,7 +4772,9 @@ _lurk_ticker_start() {
       kill -0 "$$" 2>/dev/null || exit 0
       _lurk_tick
     done
-  ) &
+  # Own stderr: otherwise the subshell acknowledges the sleep job killed
+  # by pkill with “Terminated sleep …” mid-prompt (E2E side finding).
+  ) 2>/dev/null &
   _lurk_ticker_pid=$!
 }
 
