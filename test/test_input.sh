@@ -32,7 +32,7 @@ assert() {
 export LEX_HOME="$TMP"
 
 # 1. --version
-assert "version" "lex 0.1.0" "$("$LEX_BIN" --version)"
+assert "version" "lex 0.2.0" "$("$LEX_BIN" --version)"
 
 # 2. --help
 out="$("$LEX_BIN" --help 2>&1)"
@@ -144,11 +144,16 @@ else
   printf '  [FAIL] repl (prompt after empty enter — only %s× lex>)\n' "$n_prompts" >&2
   FAIL=1
 fi
-# Static anchors: both repair spots must remain in the script.
-if grep -Fq '[[ -z "$input" ]] && { _spin_stop; _prompt; continue; }' "$LEX_BIN"; then
-  printf '  [PASS] repl (anchor: continue path pulls the prompt along)\n'
+# Static anchors: the repair spots must remain in the script.
+# Prompt guarantee since 2026-10-08: the prompt comes from `read -p`
+# (argument for readline, also fixes the line-wrap overwrite bug), so the
+# continue path must NOT pull the line along itself anymore — the anchor
+# checks both sides: continue path without _prompt AND read -p.
+if grep -Fq '[[ -z "$input" ]] && { _spin_stop; continue; }' "$LEX_BIN" \
+  && grep -Fq 'IFS= read -e -p "$(_prompt)" input' "$LEX_BIN"; then
+  printf '  [PASS] repl (anchor: continue path + read -p prompt)\n'
 else
-  printf '  [FAIL] repl (anchor: continue path pulls the prompt along)\n' >&2
+  printf '  [FAIL] repl (anchor: continue path + read -p prompt)\n' >&2
   FAIL=1
 fi
 if grep -Fq 'while [[ -f "$_spin_flag" ]]; do' "$LEX_BIN"; then

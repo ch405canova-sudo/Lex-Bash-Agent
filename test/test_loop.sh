@@ -207,6 +207,59 @@ else
 fi
 assert "loop-guard hard (message)" "1" "$([[ "$err2" == *"identical again"* ]] && echo 1 || echo 0)"
 
+# 11b. Silent-turn guard (2026-10-07, §7 #62): 12 tool turns in a row
+#      WITHOUT a visible statement → nudge, second time abort.
+#      Args vary (echo nr N) so the fail memory does NOT trigger —
+#      exactly the adwt-B2 case (195 distinct args, 200 turns to max).
+silent() {
+  printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"s'$1'","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo nr '$1'\"}"}}]}}]}'
+}
+silent_final() {
+  printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Done.","tool_calls":[]}}]}'
+}
+mock="$TMP/silent.json"
+for i in $(seq 1 12); do silent "t$i" >> "$mock"; done
+silent_final >> "$mock"
+_mock_file="$mock"
+_max_turns=30
+run_turn "twelve silent turns" > "$TMP/out_s.txt" 2> "$TMP/err_s.txt"
+rc=$?
+assert "silent-guard (soft stage: rc=0)" "0" "$rc"
+assert "silent-guard (final answer arrives)" "Done." "$(cat "$TMP/out_s.txt")"
+err_s="$(cat "$TMP/err_s.txt")"
+assert "silent-guard (nudge on stderr)" "1" "$([[ "$err_s" == *"Silent-Guard"* ]] && echo 1 || echo 0)"
+assert "silent-guard (not the fail memory)" "0" "$([[ "$err_s" == *"Fail memory"* ]] && echo 1 || echo 0)"
+# check the session record (last silent_guard)
+_srec="$(jq -r 'select(.type=="silent_guard") | .action' "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
+assert "silent-guard (session record nudge)" "nudge" "$_srec"
+
+# hard: another 12 silent turns after the nudge → rc 1
+mock="$TMP/silent2.json"
+for i in $(seq 1 24); do silent "h$i" >> "$mock"; done
+_mock_file="$mock"
+run_turn "twenty-four silent turns" >/dev/null 2> "$TMP/err_s2.txt"
+rc=$?
+if (( rc == 1 )); then
+  printf '  [PASS] silent-guard hard (rc=1)\n'
+else
+  printf '  [FAIL] silent-guard hard (rc=%s)\n' "$rc" >&2
+  FAIL=1
+fi
+assert "silent-guard hard (message)" "1" "$([[ "$(cat "$TMP/err_s2.txt")" == *"Silent-Guard: again"* ]] && echo 1 || echo 0)"
+
+# Reset: one turn WITH visible text (besides the tools) sets the streak to 0
+mock="$TMP/silent3.json"
+for i in $(seq 1 10); do silent "r$i" >> "$mock"; done
+printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Status: half done.","tool_calls":[{"id":"rz","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo more\"}"}}]}}]}' >> "$mock"
+for i in $(seq 11 20); do silent "r$i" >> "$mock"; done
+silent_final >> "$mock"
+_mock_file="$mock"
+run_turn "streak reset" > "$TMP/out_s3.txt" 2> "$TMP/err_s3.txt"
+rc=$?
+assert "silent-guard (reset: rc=0)" "0" "$rc"
+assert "silent-guard (reset: no nudge)" "0" "$([[ "$(cat "$TMP/err_s3.txt")" == *"Silent-Guard"* ]] && echo 1 || echo 0)"
+assert "silent-guard (reset: final answer)" "Done." "$(cat "$TMP/out_s3.txt")"
+
 # LEX_LOOP_GUARD=off: guard off, the turn runs through to the final answer
 export LEX_LOOP_GUARD=off
 same t1 > "$mock"; same t2 >> "$mock"; same t3 >> "$mock"

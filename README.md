@@ -1,6 +1,6 @@
 # lex
 
-A pure-Bash LLM terminal agent (v0.1.0) for a **local** llama-server.
+A pure-Bash LLM terminal agent (v0.2.0) for a **local** llama-server.
 Core dependencies: `bash`, `jq`, `curl` — optionally `node` for the MCP
 tools and `python3` for two test fixtures. No Docker, no Python runtime,
 no compiled helper.
@@ -18,7 +18,7 @@ lex                   # interactive REPL
 
 | Tool | Purpose | Missing? |
 |---|---|---|
-| bash | the script itself (tested on 5.2; no Bash-4-only constructs) | hard requirement |
+| bash | the script itself (tested on 5.2; **Bash ≥ 4** because of `coproc` — macOS system bash 3.2 is not enough: `brew install bash`) | hard requirement |
 | jq | JSON for the OpenAI protocol | hard requirement |
 | curl | HTTP to the server | hard requirement |
 | `timeout`, `realpath`, `readlink -f` | time limit / path normalisation | **fallbacks built in** (`command -v` guard) |
@@ -463,7 +463,7 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 4569 lines, 17 tools
+lex              the agent — one file, 4914 lines, 17 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)

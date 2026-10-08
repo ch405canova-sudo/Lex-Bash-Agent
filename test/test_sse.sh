@@ -279,6 +279,25 @@ assert "sse (body: stream true)" "true" \
   "$(jq -r '.stream // "missing"' <<< "$body9" 2>/dev/null)"
 assert "sse (body: stream_options.include_usage)" "true" \
   "$(jq -r '.stream_options.include_usage // "missing"' <<< "$body9" 2>/dev/null)"
+# Lever 2 (2026-10-07): chat_template_kwargs must ALWAYS be there — false is
+# the template default (unchanged behaviour), true switches thinking off for
+# tool requests. Beware jq: `false // "missing"` yields "missing" — the
+# value is therefore checked via a null comparison, not //.
+_adwt_of() {
+  jq -r '.chat_template_kwargs.auto_disable_thinking_with_tools
+    | if . == null then "missing" elif type == "boolean" then tostring else "broken" end' \
+    <<< "$1" 2>/dev/null
+}
+assert "sse (body: adwt default false)" "false" "$(_adwt_of "$body9")"
+# The running fake server keeps its ENV (FAKE_BODY_LOG path) — therefore
+# clear the same log instead of exporting a new path.
+: > "$FAKE_BODY_LOG"
+_adwt_on_save="${_auto_disable_thinking_with_tools:-}"
+_auto_disable_thinking_with_tools=on
+call_api >/dev/null 2>"$TMP/err9b.txt" || rc=$?
+body9b="$(cat "$FAKE_BODY_LOG" 2>/dev/null)"
+assert "sse (body: adwt on = true)" "true" "$(_adwt_of "$body9b")"
+_auto_disable_thinking_with_tools="${_adwt_on_save}"
 unset FAKE_BODY_LOG
 
 # ---------------------------------------------------------------------------

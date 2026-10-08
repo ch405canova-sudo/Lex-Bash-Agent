@@ -145,8 +145,11 @@ echo "fake server on port $PORT (script: $SCRIPT_FILE)" >&2
 
 # -k  = keep-open (several connections)
 #     = without `-k` ncat dies after the first connection
+# 127.0.0.1 = bind to localhost ONLY — without a host bind ncat listened on
+#     0.0.0.0 (security finding 2026-10-07: two orphaned listeners on all
+#     interfaces after aborted test runs).
 # </dev/null >/dev/null = ncat gets neither stdin nor stdout/stderr
-ncat --listen "$PORT" -k --sh-exec "$HANDLER" </dev/null >/dev/null 2>&1 &
+ncat --listen 127.0.0.1 "$PORT" -k --sh-exec "$HANDLER" </dev/null >/dev/null 2>&1 &
 NCAT_PID=$!
 disown "$NCAT_PID" 2>/dev/null || true
 

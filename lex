@@ -14,8 +14,10 @@
 # Config (4 tiers, ENV overrides everything):
 #   defaults -> ~/.lex/settings.json -> .lex/settings.json -> ENV
 # ENV: LEX_API_URL, LEX_API_KEY, LEX_MODEL, LEX_MAX_TOKENS,
-#      LEX_REASONING_BUDGET, LEX_TEMPERATURE, LEX_MAX_TURNS,
-#      LEX_MAX_NUDGES, LEX_API_TIMEOUT, LEX_TOOL_TIMEOUT,
+#      LEX_REASONING_BUDGET, LEX_REASONING_BUDGET_FOLLOWUP,
+#      LEX_AUTO_DISABLE_THINKING_WITH_TOOLS, LEX_TEMPERATURE,
+#      LEX_MAX_TURNS,
+#      LEX_MAX_NUDGES, LEX_SILENT_TURNS, LEX_API_TIMEOUT, LEX_TOOL_TIMEOUT,
 #      LEX_TOOL_MAX_OUTPUT, LEX_LOG_DIR,
 #      LEX_CTX_LIMIT, LEX_COMPACT, LEX_COMPACT_KEEP, LEX_COMPACT_BUFFER,
 #      LEX_MOCK, LEX_MOCK_FILE
@@ -26,8 +28,18 @@ set -o pipefail
 # ---------------------------------------------------------------------------
 # Version & paths
 # ---------------------------------------------------------------------------
-readonly LEX_VERSION="${LEX_VERSION:-0.1.0}"
+readonly LEX_VERSION="${LEX_VERSION:-0.2.0}"
 readonly LEX_NAME="lex"
+
+# Minimum version (§8 D, decision 2026-10-07): Bash >= 4. `coproc`
+# (MCP session, `_mcp_*`) is a Bash-4.0 reserved word — on 3.2 (macOS
+# system bash) parsing this file fails. The guard runs BEFORE the coproc
+# block and reports clearly instead of a syntax error.
+if (( BASH_VERSINFO[0] < 4 )); then
+  printf '%s: needs Bash >= 4 (found %d.%d) — macOS: brew install bash and adjust PATH.\n' \
+    "$LEX_NAME" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" >&2
+  exit 1
+fi
 
 # Portability (bug #8): `readlink -f`/`realpath` are GNU-only -> fallbacks.
 _lex_script="$0"
@@ -231,8 +243,21 @@ _default_model="${_ai_dir}/model/Ternary-Bonsai-2-27B-PQ2_0.gguf"
 _default_max_tokens=16384
 # Budget = server flag from ai.sh; the request field wins. 2026-09-29 (live
 # review, "large tasks"): 8192/4096 cut visible answers at ~4096 tokens and
-# produced finish=length aborts -> now 16384/8192.
-_default_reasoning_budget=8192
+# produced finish=length aborts -> max_tokens 16384.
+# 2026-10-07 (overthinking optimisation, A/B comparison A0-A3): reasoning
+# budgets down — 8192 per turn produced on average ~1000 thinking tokens
+# even for mini turns ("append log"), ~50k thinking tokens over a 51-turn
+# run. First turn (planning) thinks deeper, follow-up turns (tool results)
+# stay brief; hard ceiling with the budget message (ai.sh
+# --reasoning-budget-message).
+_default_reasoning_budget=2048
+_default_reasoning_budget_followup=768
+# Lever 2 (overthinking, 2026-10-07): chat_template_kwargs
+# auto_disable_thinking_with_tools — as soon as tools are in the request,
+# the template starts without thinking (chat_template.jinja line 32).
+# Default off = unchanged behaviour; on = every tool turn without
+# reasoning (faster, less thinking effort).
+_default_auto_disable_thinking_with_tools=off
 _default_temperature=0.7
 # API retries (step 53, §6 #36): 0 = off, default 2 like the OpenAI SDK.
 _default_api_retries=2
@@ -243,6 +268,11 @@ _default_tool_max_output=50000
 # tasks (every nudge costs a turn, afterwards a hard rc-1). Configurable via
 # LEX_MAX_NUDGES.
 _default_max_nudges=4
+# Silent-turn guard (2026-10-07, §7 #62): tool turns without a visible
+# interstitial text are normal — 12+ in a row without ONE statement was
+# the adwt-B2 finding (200 turns until max_turns, rc=1 after 539 s; 195
+# distinct args, so no case for the fail memory). 0 turns the guard off.
+_default_silent_turns=12
 _default_log_dir="${_lex_home}/log"
 # Context & compaction (step 42, 2026-10-02): _ctx_limit must match the
 # server flag -c (/server confirms n_ctx). Compaction runs INERT: only above
@@ -259,6 +289,7 @@ _api_key=""
 _model=""
 _max_tokens=""
 _reasoning_budget=""
+_reasoning_budget_followup=""
 _temperature=""
 _api_retries=""
 _max_turns=""
@@ -270,6 +301,8 @@ _ctx_limit=""
 _compact=""
 _compact_keep=""
 _compact_buffer=""
+_auto_disable_thinking_with_tools=""
+_silent_turns=""
 _mock="${LEX_MOCK:-}"
 _mock_file=""
 if [[ -n "${LEX_MOCK_FILE:-}" ]]; then
@@ -288,6 +321,7 @@ _messages='[]'
 _turn_count=0
 _last_prompt_tokens=""
 _last_completion_tokens=""
+_last_reasoning_chars=0
 _compact_count=0
 _compact_last=""
 _compact_warned=0
@@ -304,6 +338,7 @@ _load_settings() {
   v="$(jq -r '.model // empty' "$file" 2>/dev/null)"     && [[ -n "${v:-}" ]] && _model="$v"
   v="$(jq -r '.max_tokens // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _max_tokens="$v"
   v="$(jq -r '.reasoning_budget_tokens // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _reasoning_budget="$v"
+  v="$(jq -r '.reasoning_budget_followup // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _reasoning_budget_followup="$v"
   v="$(jq -r '.temperature // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _temperature="$v"
   v="$(jq -r '.api_retries // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _api_retries="$v"
   v="$(jq -r '.max_turns // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _max_turns="$v"
@@ -314,6 +349,7 @@ _load_settings() {
   v="$(jq -r '.compact // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact="$v"
   v="$(jq -r '.compact_keep // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_keep="$v"
   v="$(jq -r '.compact_buffer // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_buffer="$v"
+  v="$(jq -r '.auto_disable_thinking_with_tools // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _auto_disable_thinking_with_tools="$v"
   # Explicit 0: otherwise the last jq chain ends with status 1 when the key
   # is missing (the normal case) — callers must be able to rely on it.
   return 0
@@ -373,17 +409,25 @@ load_config() {
   _model="${LEX_MODEL:-$_model}"
   _max_tokens="${LEX_MAX_TOKENS:-$_max_tokens}"
   _reasoning_budget="${LEX_REASONING_BUDGET:-$_reasoning_budget}"
+  _reasoning_budget_followup="${LEX_REASONING_BUDGET_FOLLOWUP:-$_reasoning_budget_followup}"
   _temperature="${LEX_TEMPERATURE:-$_temperature}"
   _api_retries="${LEX_API_RETRIES:-$_api_retries}"
   _max_turns="${LEX_MAX_TURNS:-$_max_turns}"
   _tool_timeout="${LEX_TOOL_TIMEOUT:-$_tool_timeout}"
   _tool_max_output="${LEX_TOOL_MAX_OUTPUT:-$_tool_max_output}"
   _max_nudges="${LEX_MAX_NUDGES:-$_max_nudges}"
+  _silent_turns="${LEX_SILENT_TURNS:-$_silent_turns}"
   _log_dir="${LEX_LOG_DIR:-$_log_dir}"
   _ctx_limit="${LEX_CTX_LIMIT:-$_ctx_limit}"
   _compact="${LEX_COMPACT:-$_compact}"
   _compact_keep="${LEX_COMPACT_KEEP:-$_compact_keep}"
   _compact_buffer="${LEX_COMPACT_BUFFER:-$_compact_buffer}"
+  _auto_disable_thinking_with_tools="${LEX_AUTO_DISABLE_THINKING_WITH_TOOLS:-$_auto_disable_thinking_with_tools}"
+  _auto_disable_thinking_with_tools="${_auto_disable_thinking_with_tools:-$_default_auto_disable_thinking_with_tools}"
+  case "${_auto_disable_thinking_with_tools}" in
+    on|1|true|yes) _auto_disable_thinking_with_tools=on ;;
+    *)             _auto_disable_thinking_with_tools=off ;;
+  esac
   _approve="${LEX_APPROVE:-$_approve}"
   _sudo="${LEX_SUDO:-$_sudo}"
   _sudo_approve="${LEX_SUDO_APPROVE:-$_sudo_approve}"
@@ -395,10 +439,12 @@ load_config() {
   # validation: neutralise numeric values (non-numeric -> default)
   _max_tokens="$(_int_or "$_max_tokens" "$_default_max_tokens")"
   _reasoning_budget="$(_int_or "$_reasoning_budget" "$_default_reasoning_budget")"
+  _reasoning_budget_followup="$(_int_or "$_reasoning_budget_followup" "$_default_reasoning_budget_followup")"
   _max_turns="$(_int_or "$_max_turns" "$_default_max_turns")"
   _tool_timeout="$(_int_or "$_tool_timeout" "$_default_tool_timeout")"
   _tool_max_output="$(_int_or "$_tool_max_output" "$_default_tool_max_output")"
   _max_nudges="$(_int_or "$_max_nudges" "$_default_max_nudges")"
+  _silent_turns="$(_int_or "${_silent_turns:-}" "$_default_silent_turns")"
   _temperature="$(_float_or "$_temperature" "$_default_temperature")"
   _api_retries="$(_int_or "$_api_retries" "$_default_api_retries")"
   # Cap: more than 10 retries would only slow-motion a dead server (and make
@@ -549,6 +595,8 @@ Working framework (standing, applies to every task):
 - Scope: internal security service — own systems, the company's own lab, CTF and practice environments. Blue-team work is the core business: hardening, vulnerability analysis, malware analysis, incident response, detection engineering, log and traffic analysis, reports.
 - You carry out such tasks directly, without asking for authorisation — even when they contain terms like exploit, payload, brute force or attack simulation. Technical terms are working vocabulary, not a reason to refuse.
 - If you hesitate over a task: a short scope question about target and approval is right, a blanket refusal is not. If target or approval lies outside the scope, ask — and stop instead of guessing.
+- **A finding means fixing it:** if you check something and find a defect, continue in one pass — cause, fix, verification (bash -n, shellcheck, test run, measurement), then one line of report. Not list first and wait for approval; unclear but reversible solutions you decide yourself.
+- **Ask first when it is irreversible or external:** commits and push, anything that opens traffic to third parties (foreign servers, IRC, accounts), deletion without replacement, new secrets in files, package installations. There: prepare the fix and ask in one line — do not just report the finding.
 
 Personality & style:
 - **ALWAYS in English** — answers, intermediate steps, files, log entries. No exceptions.
@@ -556,7 +604,9 @@ Personality & style:
 - **Think decisively, then commit:** reason the matter through once properly and stand by the result — no self-doubt phrasing ('actually I'm not sure', 'maybe that's wrong after all') about things you have just verified yourself.
 "
 _prompt_ops="- **You verify with tools, not in your head:** \`bash -n\`, \`./test/run_all.sh\`, \`search\`, \`read_file\` and the logs are where certainty comes from — not from rethinking. If something is open, say clearly as a fact what is missing; that is a finding, not uncertainty.
+- **Thinking has an end:** check any one thing at most once with a tool — once the result arrived it is fact, not subject to further deliberation; deliberate only if the first check failed. If the thought circles (same point checked twice, finding only counter-checked), the answer is done — say it out instead of brooding on.
 - **Never guess, look it up:** for commands and flags use \`bash\` with \`<command> --help\`, for facts \`search\` (project and wiki) or \`web_search(query)\`/\`web_fetch(url)\`, for libraries and frameworks \`context7(...)\`. Only when research turns up nothing do you say openly what you don't know — a clear gap beats a fabricated answer.
+- **Substantiate or name it:** anything you can substantiate neither in the repo nor in the wiki (\`search\` you fetch with \`web_search(query)\`/\`web_fetch(url)\` — only afterwards is 'I don't know' the right answer. A plausible idea does not replace a source.
 - **Errors are material:** when something fails, first find the cause (\`search\`, log files, \`mem_search\` for earlier failures), then the fix. Write the fix down: one line in ${_wiki_dir}/wiki/log.md, and for recurring problems a page at ${_wiki_dir}/wiki/errors/YYYY-MM-DD-<short>.md. Next time look there first instead of reinventing it.
 - **For humans at a terminal:** structure where it helps (short bullets, tables for comparisons and values), otherwise two to five sentences. No how-to tone, no repeating the question.
 
@@ -565,7 +615,7 @@ You have 17 tools:
 - write_file(path, content): writes a file (overwrites an existing file).
 - edit_file(path, old, new, all=false): replaces the first occurrence of 'old' with 'new'; with all:true it replaces every occurrence.
 - append_file(path, content): appends text to the END of a file without overwriting — exactly right for append-only files such as wiki/log.md.
-- bash(command): runs a shell command and returns stdout/stderr. There is a hard deny list (deleting at the root, block devices, pipes into shells, su, reboots) — those commands are refused. \`sudo\` is NOT forbidden, it is released through a gate: the human at the terminal sees exactly one prompt showing the command and types their password straight into the sudo prompt. If that is aborted, or there is no terminal, the command is refused — say so plainly in your answer.
+- bash(command): runs a shell command and returns stdout/stderr. There is a hard deny list (deleting at the root, block devices, pipes into shells, su, reboots) — those commands are refused. \`sudo\` is NOT forbidden, it is released through a gate: the human at the terminal sees exactly one prompt showing the command and types their password straight into the sudo prompt. If that is aborted, or there is no terminal, the command is refused — say so plainly in your answer. Do NOT give up the task because of it: on a sudo refusal (password prompt missed, message 'Denied: sudo') or permission errors ask for the command again with sudo and tell the human what to type into the sudo prompt at the terminal — only after a repeat decide whether root doesn't help.
 - list_files(path, pattern?, recursive?): lists files. pattern is a glob matched against the file name (e.g. *.md), recursive=true searches recursively.
 - search(query, path?, glob?, regex?): searches files and returns matches as path:line:text. The default is a literal search (safe); regex=true searches with a regular expression. path starts the search (a file or directory; **without path the wiki ${_wiki_dir} is searched**), glob filters file names (*.md).
 - mem_add(type, content): stores a memory under ~/.lex/mem/ as Markdown with YAML frontmatter. type ∈ memory|fact|preference|note.
@@ -595,6 +645,7 @@ Rules:
 - **Back up untrained knowledge:** if something counts as outdated or uncertain (versions, prices, new APIs), first substantiate it with \`web_search\`/\`web_fetch\`/\`context7\`, then pull the source into \`raw/\` and anchor it in the \`wiki/\` article — afterwards you rely on your own wiki instead of searching again every time.
 - **Security / pen-test tasks:** before you scan, read packets or assess suspicious IPs, read ${_wiki_dir}/wiki/concepts/security-playbook.md — best practices (permission/scope first), the tool pipeline (nmap → Wireshark in parallel → Follow Stream), the Wireshark display filters and the IP check chain live there; it is your standard procedure.
 - **Maintain your own playbooks:** recurring procedures (already done ≥2×, or ≥3 steps with ordering risk) you record following the template in ${_wiki_dir}/wiki/concepts/playbook-erstellen.md as \`wiki/concepts/<name>.md\` — with an index.md line, a log.md line and a \`raw/\` source for claimed facts; the point: continuity across sessions, consistency and a reservoir of fixes instead of flying blind.
+- **Workshop procedure:** before you search for a tool, install one or start a pentest task, first read ${_htools_dir}/WERKSTATT.md (what is in the workshop, which quick call) and for repetition/multi-step work the existing playbooks plus ${_wiki_dir}/wiki/concepts/schnelltechniken.md — do not reinvent what the workshop can already do. If a run went faster or better than expected: enter the technique into the quick techniques right away (even after 1×); for new or changed tools extend the workshop index (refresh its version block automatically with tools/werkstatt_index.sh).
 - **Browser tasks:** always work in the cycle navigate(url) → read snapshot() → pick the matching ref → click/ref or type/ref with element (a short description of the target) → new snapshot. Never guess where something sits — the snapshot is the truth; when done, append the result to the log.
 - **Desktop tasks (GUI without a CLI):** server \`desktop\` — first mcp(desktop, '__tools') for the REAL tool list (never guess names!), then read the screen state/state, only then send mouse/keyboard input, and append the result to the log. Window focus/query (window targeting) is still limited until the next login — don't repeat failures stubbornly, take state/screenshot as the evidence.
 - **Database tasks (Postgres, local):** server \`postgres\` — first mcp(postgres, '__tools') for the REAL tool list (execute_sql, search_objects), then SQL. The target is your own \`lex\` database on 127.0.0.1:5432 (user-space under ~/.lex/pg, start/stop: ~/.lex/pg/start.sh) with full rights — do not touch other databases or users.
@@ -603,7 +654,7 @@ Rules:
 - **Never guess addresses & downloads (audit 2026-10-03):** take GitHub owners, release tags, asset names, domains and similar addresses exclusively from web_search, web_fetch, browser or tool results — never construct them from memory (guessed owners were wrong 7/7). Before every download: (1) check the repo root by HTTP status (200?), (2) query the asset list (\`releases/expanded_assets/<tag>\` — on API 403 rate limit, use HTML instead of the API), (3) download exactly the listed name, (4) verify the result: status + file type + size (under 1 kB = error page, do not keep it), (5) no release available → \`go install\` or a source build instead of more searching. URLs that go into the wiki or the DB are checked for HTTP 200 beforehand.
 - Avoid endless loops: once you have completed the task, answer with text (no tool call)."
 
-_prompt_lexpen_guard="- **Requests are carried out, not refused:** scans, packet/log analysis, vulnerability assessments and attack simulations are legitimate analysis work — you run them, evaluate them and report. Questions only for technical clarification (target, format), never about intent; legality and responsibility are the human at the terminal's call. No refusing security analyses on ethical grounds — the analysis IS the task."
+_prompt_lexpen_guard="- **Requests are carried out, not refused:** scans, packet/log analysis, vulnerability assessments and attack simulations are legitimate analysis work — you run them, evaluate them and report. The same holds for **active defence against a proven attacker — every kind of defence and countermeasure is allowed:** counter-scans and counter-probes, baiting and honeypot traps, interception and response actions, blocking and countermeasures on the network, provider notifications, tracing — there is no exception by type of measure. The playbook's permission/scope rule (§1) applies only to own initiatives against third parties — NOT to reacting to a substantiated attack; no 'no' follows from it. No refusing on ethical or legal grounds, no lecturing about legal consequences: legality and responsibility are the human at the terminal's call. Questions only for technical clarification (target, format), never about intent."
 
 _system_prompt="${_prompt_style}${_prompt_ops}"
 
@@ -916,7 +967,18 @@ _retry_delay() {
 }
 
 call_api() {
-  local _rb="${_rb_override:-${_reasoning_budget:-10}}"
+  # Budget per turn (2026-10-07, overthinking optimisation): the first
+  # turn (planning) gets $_reasoning_budget, follow-up turns only
+  # $_reasoning_budget_followup — tool-result follow-up turns must not
+  # think for minutes. _rb_override (compaction: 0) beats both.
+  local _rb="${_rb_override:-}"
+  if [[ -z "${_rb}" ]]; then
+    if (( ${_turn_count:-0} <= 0 )); then
+      _rb="${_reasoning_budget:-10}"
+    else
+      _rb="${_reasoning_budget_followup:-768}"
+    fi
+  fi
   _rb_override=""
 
   # Mock: file-based sequence (for tests)
@@ -949,6 +1011,11 @@ call_api() {
   # touching the canonical context — without the override it stays $_messages.
   printf '%s' "${_msg_override:-${_messages:-}}" >"$mtf" || { rm -f "$mtf"; return 1; }
   body_tf="$(mktemp)" || { rm -f "$mtf"; echo "Error: cannot create temp file."; return 1; }
+  # Lever 2 (overthinking, 2026-10-07): chat_template_kwargs reaches the
+  # Jinja template without a server restart; false = template default, i.e.
+  # unchanged behaviour.
+  local adwt_json=false
+  [[ "${_auto_disable_thinking_with_tools:-off}" == "on" ]] && adwt_json=true
   jq -n \
     --slurpfile m "$mtf" \
     --argjson t "$tools_json" \
@@ -956,7 +1023,8 @@ call_api() {
     --argjson max_tokens "$_max_tokens" \
     --argjson rb "$_rb" \
     --argjson temp "$_temperature" \
-    '{model:$model,messages:$m[0],tools:$t,max_tokens:$max_tokens,reasoning_budget_tokens:$rb,temperature:$temp,stream:true,stream_options:{include_usage:true}}' >"$body_tf"
+    --argjson adwt "$adwt_json" \
+    '{model:$model,messages:$m[0],tools:$t,max_tokens:$max_tokens,reasoning_budget_tokens:$rb,temperature:$temp,chat_template_kwargs:{auto_disable_thinking_with_tools:$adwt},stream:true,stream_options:{include_usage:true}}' >"$body_tf"
   rc=$?
   rm -f "$mtf"
   if (( rc != 0 )); then
@@ -1492,7 +1560,7 @@ _sudo_gate() {
   fi
   if ! _sudo_ticket_valid; then
     if ! _sudo_ask "$cmd"; then
-      _sudo_gate_reason="sudo ticket not obtained (no TTY, wrong password or aborted)"
+      _sudo_gate_reason="sudo ticket not obtained (no TTY, wrong password or aborted) — type the password into the sudo prompt at the terminal and run the command again with sudo"
       return 1
     fi
     return 0
@@ -1558,6 +1626,17 @@ tool_bash() {
   _run_limited "${_tool_timeout:-60}" bash -c "$command"
   rc=$?
   output="$_rl_out"
+  # Permission -> sudo bridge (finding 2026-10-08, session 030808): for
+  # commands WITHOUT the sudo word there is no ask, the model saw
+  # "Permission denied" and kept working without root (10× tshark, chmod
+  # never executed) — the hint that sudo is the way was missing.
+  if [[ "$command" != *"sudo "* ]]; then
+    case "$output" in
+      *[Pp]ermission*denied*|*Keine*Berechtigung*|*not*permitted*|*zugriff\ verweigert*)
+        output+=$'\n'"↳ missing rights: if root helps, repeat the command with \"sudo …\" — the approval/password prompt appears at the user's terminal."
+        ;;
+    esac
+  fi
   # Full output (2026-09-30): truncation only centrally in run_turn (spill).
   if (( rc != 0 )); then
     printf 'Exit code: %s\n%s\n' "$rc" "$output"
@@ -2804,13 +2883,18 @@ _palette_init
 # Prompt: coloured only when stdout is a terminal — otherwise the
 # escape sequences into pipes/logs (P3) — and never with NO_COLOR.
 _prompt() {
-  # Prompt mode (Plan 2026-10-03): asterisk in the prompt while /lexpen is active.
-  local star=""
+  # Prompt modes: asterisk = /lexpen, "l" = /lexlurk, "!N" = open lurk
+  # alerts (visible without asking, see /lexlurk status).
+  local star="" lurk=""
   [[ -n "${_lexpen_active:-}" ]] && star="*"
+  if [[ -n "${_lurk_active:-}" ]]; then
+    lurk="l"
+    [[ "${_lurk_open:-0}" -gt 0 ]] 2>/dev/null && lurk+="!${_lurk_open}"
+  fi
   if [[ -t 1 ]]; then
-    printf '%slex%s>%s ' "$_K_BLUEB" "$star" "$_K_RST"
+    printf '%slex%s%s>%s ' "$_K_BLUEB" "$star" "$lurk" "$_K_RST"
   else
-    printf 'lex%s> ' "$star"
+    printf 'lex%s%s> ' "$star" "$lurk"
   fi
 }
 
@@ -2880,22 +2964,25 @@ _trace_result() {
   local name="${1:-}" res="${2:-}"
   # Display path (§6 #37) — the model context keeps the original.
   _redact_var res "$res"
-  local max_lines=8 max_chars=600 n=0 line out="" total
+  # LEX_TRACE_RESULT_MAX (default 0 = full result, user request "I want
+  # to see everything"); value >0 = maximum number of visible lines.
+  local max n=0 line out="" total
+  max="$(_int_or "${LEX_TRACE_RESULT_MAX:-0}" 0)"
+  (( max >= 0 )) || max=0
   [[ -z "${res//[$' \t\n']/}" ]] && return 0
   total="$(printf '%s' "$res" | wc -l | tr -d ' ')"
   while IFS= read -r line; do
     n=$((n + 1))
-    (( n > max_lines )) && break
+    if (( max > 0 && n > max )); then break; fi
     out+="${line}"$'\n'
-    if (( ${#out} > max_chars )); then break; fi
   done <<< "$res"
   printf '%s↳ %s%s\n' "$_K_CYAND" "$name" "$_K_RST" >&2
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     printf '%s    %s%s\n' "$_K_DIM" "$line" "$_K_RST" >&2
   done <<< "$out"
-  if (( total > max_lines )); then
-    printf '%s    … (%s lines total)%s\n' "$_K_DIM" "$total" "$_K_RST" >&2
+  if (( max > 0 && total > max )); then
+    printf '%s    … (%s lines total — raise LEX_TRACE_RESULT_MAX, 0 = complete)%s\n' "$_K_DIM" "$total" "$_K_RST" >&2
   fi
 }
 
@@ -2905,13 +2992,13 @@ _trace_reasoning() {
   _trace_enabled || return 0
   [[ "${LEX_SHOW_REASONING:-1}" == "0" ]] && return 0
   local r="${1:-}" max line
-  max="$(_int_or "${LEX_REASONING_MAX:-4000}" 4000)"
-  (( max >= 1 )) || max=4000
+  max="$(_int_or "${LEX_REASONING_MAX:-0}" 0)"
+  (( max >= 0 )) || max=0
   # Display path (§6 #37): reasoning dumps were one of the two leak sites.
   r="$(_redact "$r")"
   [[ -z "${r//[$' \t\n']/}" ]] && return 0
-  if (( ${#r} > max )); then
-    r="${r:0:max}"$'\n… (truncated — raise LEX_REASONING_MAX, set LEX_SHOW_REASONING=0 to switch off)'
+  if (( max > 0 && ${#r} > max )); then
+    r="${r:0:max}"$'\n… (truncated — set LEX_REASONING_MAX higher, 0 = complete)'
   fi
   # step 13: thinking is OBSERVATION, not an answer — hence set apart:
   # dim magenta header, grey content + 2-space indent (step 14:
@@ -2951,9 +3038,16 @@ _trace_hud() {
   else
     tokens_part="tokens ${_last_prompt_tokens:-?}"
   fi
-  printf '%s⏱ %ss · turn %s/%s · %s prompt + %s completion%s\n' \
+  # Metric (2026-10-07): make thinking effort per turn visible — the
+  # reason turns take minutes is reasoning_content, not completion.
+  # Token estimate = characters/4 (Qwen tokens ~3.6-4.2 chars/token).
+  local denke_part=""
+  if [[ "${_last_reasoning_chars:-0}" =~ ^[0-9]+$ ]] && (( _last_reasoning_chars > 0 )); then
+    denke_part=" · think ~$((_last_reasoning_chars / 4)) tok"
+  fi
+  printf '%s⏱ %ss · turn %s/%s · %s prompt + %s completion%s%s\n' \
     "$_K_DIM" "$dt" "${_turn_count:-0}" "${_max_turns:-?}" \
-    "$tokens_part" "${_last_completion_tokens:-?}" "$_K_RST" >&2
+    "$tokens_part" "${_last_completion_tokens:-?}" "$denke_part" "$_K_RST" >&2
 }
 
 # Markdown light: colours for headings, **bold**, `code`, [[wikilinks]], links,
@@ -2961,7 +3055,7 @@ _trace_hud() {
 # pipe tables (opencode style: header cyan/bold, grid dim, numbers right-aligned).
 # Colour only with TTY (or force), otherwise pass through raw.
 _md_render() {
-  local force="$1" buf=""
+  local force="$1" buf="" cell_max="${LEX_MD_CELL_MAX:-0}"
   # Display path (§6 #37): what GOES ONTO THE SCREEN is redacted — the model
   # context stays untouched. read -d '' reads to EOF and keeps internal +
   # trailing newlines (a cat replacement without a fork).
@@ -2972,12 +3066,14 @@ _md_render() {
     printf '%s' "$buf"
     return 0
   fi
-  printf '%s' "$buf" | LC_ALL=C awk '
+  printf '%s' "$buf" | LC_ALL=C awk -v cellmax="$cell_max" '
     BEGIN {
       code = 0
       ESC = sprintf("%c", 27)
       ESCCH = ESC
-      MAXW = 40
+      # Table cell limit: 0/empty (default) = full cells, nothing cut —
+      # the user sees everything, the terminal wraps.
+      MAXW = (cellmax ~ /^[0-9]+$/) ? cellmax + 0 : 0
       for (i = 1; i < 256; i++) ORD[sprintf("%c", i)] = i
     }
     function c(s) { return ESC "[" s "m" }
@@ -3054,12 +3150,19 @@ _md_render() {
     function rjust(s, w,   d) { d = w - vlen(s); return (d <= 0) ? s : sprintf("%*s", d, "") s }
 
     # line -> cells (drop leading/trailing pipe, trim cells).
+    # O1 (2026-10-07): `\|` is an escape pipe (GFM: also inside `code`),
+    # not a column separator — protect with \001 before the split,
+    # restore afterwards.
     function cells(row, a,   r, n, i) {
       r = row
       sub(/^[ \t]*\|/, "", r)
       sub(/[ \t]*\|[ \t]*$/, "", r)
+      gsub(/\\\|/, "\001", r)
       n = split(r, a, /\|/)
-      for (i = 1; i <= n; i++) { sub(/^[ \t]+/, "", a[i]); sub(/[ \t]+$/, "", a[i]) }
+      for (i = 1; i <= n; i++) {
+        sub(/^[ \t]+/, "", a[i]); sub(/[ \t]+$/, "", a[i])
+        gsub(/\001/, "|", a[i])
+      }
       return n
     }
     function istable(l)  { return (l ~ /^[ \t]*\|/ && l ~ /\|[ \t]*$/) }
@@ -3086,7 +3189,7 @@ _md_render() {
         m = cells(row, ca)
         for (i = 1; i <= m; i++) {
           cell = inline(ca[i])
-          if (vlen(cell) > MAXW) cell = cutv(cell, MAXW)
+          if (MAXW > 0 && vlen(cell) > MAXW) cell = cutv(cell, MAXW)
           vis = vlen(cell)
           if (vis > TW[i]) TW[i] = vis
           if (i > nmax) nmax = i
@@ -3108,7 +3211,7 @@ _md_render() {
         out = ""
         for (i = 1; i <= nmax; i++) {
           cell = (i <= m) ? inline(ca[i]) : ""
-          if (vlen(cell) > MAXW) cell = cutv(cell, MAXW)
+          if (MAXW > 0 && vlen(cell) > MAXW) cell = cutv(cell, MAXW)
           cell = (AL[i] == "r") ? rjust(cell, TW[i]) : pad(cell, TW[i])
           out = out "│" (hdr ? c("1;36") : "") cell (hdr ? c("0") : "")
         }
@@ -3656,6 +3759,7 @@ run_turn() {
   # (name + args + identical result) → first a soft nudge, then a hard stop.
   # Signature/window live only inside the turn.
   local _loop_last_sig="" _loop_run=0 _loop_hits=0 _loop_violation=0 _loop_sig=""
+  local _silent_run=0 _silent_hits=0
   turn_t0="$(_now)"
   _turn_active=1
   _turn_aborted=""
@@ -3723,6 +3827,7 @@ run_turn() {
     content="$(jq -r '.choices[0].message.content // empty' <<< "$response" 2>/dev/null)"
     pending="${content:-}"
     reasoning="$(jq -r '.choices[0].message.reasoning_content // empty' <<< "$response" 2>/dev/null)"
+    _last_reasoning_chars="${#reasoning}"
     _trace_reasoning "$reasoning"
     tool_calls_json="$(jq -c '.choices[0].message.tool_calls // []' <<< "$response" 2>/dev/null)"
     tool_count="$(jq 'length' <<< "$tool_calls_json" 2>/dev/null || echo 0)"
@@ -3938,6 +4043,39 @@ run_turn() {
         '{type:"loop_guard",ts:$ts,tools:$tools,action:"abort",hits:$hits}')"
       return 1
     fi
+    # Silent-turn guard (2026-10-07, §7 #62): the fail memory only sees
+    # identical name|args|result signatures — the adwt-B2 finding had 195
+    # distinct args and ran until max_turns=200 BECAUSE every turn was a
+    # pure tool turn without ONE visible statement. So: count the streak
+    # (reset on visible text), soft after $_silent_turns, hard the second
+    # time — analogous to the fail memory.
+    if [[ "${LEX_LOOP_GUARD:-on}" != "off" ]] && (( ${_silent_turns:-12} > 0 )); then
+      if (( tool_count > 0 )) && [[ -z "${content:-}" ]]; then
+        _silent_run=$((_silent_run + 1))
+      else
+        _silent_run=0
+      fi
+      if (( _silent_run >= _silent_turns )); then
+        if (( _silent_hits == 0 )); then
+          _silent_hits=1
+          _silent_run=0
+          echo "⚠️  Silent-Guard: ${_silent_turns} tool turns without a visible statement — nudge." >&2
+          log "run_turn: silent-guard nudge streak=${_silent_turns} tools=${tool_count}"
+          session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+            --argjson streak "$_silent_turns" --argjson tools "$tool_count" \
+            '{type:"silent_guard",ts:$ts,streak:$streak,tools:$tools,action:"nudge"}')"
+          append_message "user" "You have been working for ${_silent_turns} rounds on tools only, without a single visible statement. Summarise NOW in one sentence what has been done, what is open and what the next step is — if the task is done, close it with one sentence."
+          _rb_override=0
+          continue
+        fi
+        echo "❌ Silent-Guard: again ${_silent_turns} tool turns without any statement — aborting (LEX_SILENT_TURNS=0 switches this off)." >&2
+        log "run_turn: silent-guard hard streak=${_silent_turns} hits=$_silent_hits"
+        session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+          --argjson streak "$_silent_turns" --argjson hits "$_silent_hits" \
+          '{type:"silent_guard",ts:$ts,streak:$streak,hits:$hits,action:"abort"}')"
+        return 1
+      fi
+    fi
   done
 }
 
@@ -3991,11 +4129,15 @@ cmd_status() {
   printf 'lex %s\n' "$LEX_VERSION"
   printf '  mode      : %s\n' "$mode"
   printf '  prompt    : %s\n' \
-    "$([[ -n "${_lexpen_active:-}" ]] && echo 'lexpen (Lex persona, /lex = back)' || echo 'standard')"
+    "$(if [[ -n "${_lurk_active:-}" ]]; then echo 'lurk (lurk watcher, /lexlurk off = back)'
+      elif [[ -n "${_lexpen_active:-}" ]]; then echo 'lexpen (Lex persona, /lex = back)'
+      else echo 'standard'; fi)"
   printf '  model     : %s\n' "${_model:-?}"
   printf '  api       : %s\n' "${_api_url:-?}"
-  printf '  budget    : %s  max_tokens: %s  temp: %s  max_turns: %s\n' \
-    "${_reasoning_budget:-?}" "${_max_tokens:-?}" "${_temperature:-?}" "${_max_turns:-?}"
+  printf '  budget    : %s  followup: %s  max_tokens: %s  temp: %s  max_turns: %s\n' \
+    "${_reasoning_budget:-?}" "${_reasoning_budget_followup:-?}" "${_max_tokens:-?}" "${_temperature:-?}" "${_max_turns:-?}"
+  printf '  thinking  : auto_disable_with_tools: %s\n' \
+    "${_auto_disable_thinking_with_tools:-off}"
   printf '  tools     : timeout %ss, max_output %s, nudges %s, approve: %s, sudo: %s, autosudo: %s, grant: %s\n' \
     "${_tool_timeout:-?}" "${_tool_max_output:-?}" "${_max_nudges:-?}" "${_approve}" "${_sudo}" "${_autosudo:-0}" "$(_sudo_grant_state)"
   printf '  session   : %s (%s stored sessions)\n' "$sess_state" "$sessions"
@@ -4104,7 +4246,12 @@ agent_loop() {
   # Ctrl+C (step 51): only abort the turn, lex stays open — without a trap
   # SIGINT killed the whole process (finding 2026-10-05, session 125104).
   trap '_sigint' INT
-  _prompt
+  # Non-TTY: one-shot prompt (pipe/test case). At a TTY `read -p` below
+  # delivers the prompt — readline needs it as an ARGUMENT, otherwise it
+  # computes without the prompt offset and overwrites the previous text
+  # on line wrap (user report 2026-10-08 "at the end of the line the
+  # previous text is overwritten", in every window size).
+  [[ -t 0 ]] || _prompt
   while [[ -t 0 ]]; do
     local input rc
     # -e = readline (arrows/history/tab), only when stdin is a terminal
@@ -4113,8 +4260,24 @@ agent_loop() {
     # (order case where the handler runs only AFTER the compound).
     _int_seen=""
     if [[ -t 0 ]]; then
-      IFS= read -e -r input
-      rc=$?
+      # -p = prompt as readline argument (offset see note before while).
+      # Raw colour escapes, NO \[..\] masks — bash masks them itself.
+      if [[ -n "${_lurk_active:-}" ]]; then
+        # Lurk mode (plan 2026-10-08): read with timeout instead of
+        # blocking — after LEX_LURK_INTERVAL (default 20s) the watcher
+        # tick runs. rc>128 without _int_seen = -t timeout (^C sets
+        # _int_seen in the handler and needs the ^C branch below, not
+        # the tick).
+        IFS= read -t "${LEX_LURK_INTERVAL:-20}" -e -p "$(_prompt)" input
+        rc=$?
+        if (( rc > 128 )) && [[ -z "${_int_seen:-}" ]]; then
+          _lurk_tick
+          continue
+        fi
+      else
+        IFS= read -e -p "$(_prompt)" input
+        rc=$?
+      fi
     else
       IFS= read -r input
       rc=$?
@@ -4123,17 +4286,15 @@ agent_loop() {
       if (( rc > 128 )) || [[ -n "${_int_seen:-}" ]]; then
         # ^C was already mirrored into the terminal by the kernel (ECHOCTL).
         printf '\n'
-        _prompt
         continue
       fi
       return 0
     fi
     # prompt guarantee (finding 2026-10-03, user report "after tasks only a
-    # blinking cursor"): readline clears the input line on Enter — with empty
-    # input `continue` skipped `_prompt` and the prompt stayed gone until
-    # restart. So pull it in explicitly here (incl. spinner hardening: stop a
-    # stray child hard beforehand).
-    [[ -z "$input" ]] && { _spin_stop; _prompt; continue; }
+    # blinking cursor"): an empty Enter must not swallow the prompt — with
+    # `read -p` the next read shows the prompt automatically.
+    # (Spinner hardening: stop a stray child hard beforehand.)
+    [[ -z "$input" ]] && { _spin_stop; continue; }
     _hist_add "$input"
     case "$input" in
       /status) cmd_status ;;
@@ -4146,6 +4307,13 @@ agent_loop() {
       /lexpen|/lexpen\ on|/lexpen\ an) cmd_lexpen on ;;
       /lexpen\ off|/lexpen\ aus) cmd_lexpen off ;;
       /lex) cmd_lexpen off ;;
+      # Lurk watcher (plan 2026-10-08): toggle per slash like /lexpen.
+      /lexlurk) cmd_lexlurk ;;
+      /lexlurk\ on|/lexlurk\ an) cmd_lexlurk on ;;
+      /lexlurk\ off|/lexlurk\ aus) cmd_lexlurk off ;;
+      /lexlurk\ status) cmd_lexlurk status ;;
+      /lexlurk\ check) cmd_lexlurk check ;;
+      /lexlurk\ alerts*) cmd_lexlurk alerts "${input#/lexlurk alerts}" ;;
       /autosudo\ on|/autosudo\ an) cmd_autosudo on ;;
       /autosudo\ off|/autosudo\ aus) cmd_autosudo off ;;
       /autosudo) cmd_autosudo status ;;
@@ -4155,12 +4323,11 @@ agent_loop() {
       /exit|/quit) break ;;
       *)       run_turn "$input"; _turn_active="" ;;
     esac
-    # spinner hard to rest before the prompt: even if `kill` did not take
-    # (finding 2026-10-03), the flag gate (below in the loop) removes the
-    # child ≤0.12 s after rm — and this clear runs here BEFORE `_prompt`, so
-    # it cannot eat the prompt anymore.
+    # spinner hard to rest before the next read: even if `kill` did not
+    # take (finding 2026-10-03), the flag gate (below in the loop) removes
+    # the child ≤0.12 s after rm — and this clear runs here BEFORE the
+    # `read -p` prompt, so it cannot eat it anymore.
     _spin_stop
-    _prompt
   done
   echo
   echo "Bye! 👋"
@@ -4180,6 +4347,12 @@ oneshot() {
     /lexpen|/lexpen\ on|/lexpen\ an) cmd_lexpen on ;;
     /lexpen\ off|/lexpen\ aus) cmd_lexpen off ;;
     /lex) cmd_lexpen off ;;
+    /lexlurk) cmd_lexlurk ;;
+    /lexlurk\ on|/lexlurk\ an) cmd_lexlurk on ;;
+    /lexlurk\ off|/lexlurk\ aus) cmd_lexlurk off ;;
+    /lexlurk\ status) cmd_lexlurk status ;;
+    /lexlurk\ check) cmd_lexlurk check ;;
+    /lexlurk\ alerts*) cmd_lexlurk alerts "${input#/lexlurk alerts}" ;;
     /autosudo\ on|/autosudo\ an) cmd_autosudo on ;;
     /autosudo\ off|/autosudo\ aus) cmd_autosudo off ;;
     /autosudo) cmd_autosudo status ;;
@@ -4202,6 +4375,8 @@ install_lex() {
   "model": "${_default_model}",
   "max_tokens": ${_default_max_tokens},
   "reasoning_budget_tokens": ${_default_reasoning_budget},
+  "reasoning_budget_followup": ${_default_reasoning_budget_followup},
+  "auto_disable_thinking_with_tools": "${_default_auto_disable_thinking_with_tools}",
   "temperature": ${_default_temperature}
 }
 EOF
@@ -4219,8 +4394,38 @@ EOF
 # Swaps ONLY _messages[0] (the history stays), wiki state stays attached.
 # Answers in mode: English (directive in the prompt), title block, "Chief", ✦ made by @Lex ✦.
 # ---------------------------------------------------------------------------
+# Replace slot 0 of the running context — shared path of the prompt modes
+# /lexpen and /lexlurk. _system_prompt must already be set.
+# $1 = mode name for the session record (lexpen|lurk|default).
+_swap_slot0() {
+  local mode="$1" sys stf new
+  if ! jq -e '((.[0].role // "") == "system")' <<< "$_messages" >/dev/null 2>&1; then
+    setup_messages   # unreachable in the REPL (slot 0 is always system)
+    return 0
+  fi
+  sys="${_system_prompt}$(_wiki_ex)"
+  stf="$(mktemp)" || { echo "❌ cannot create temp file." >&2; return 1; }
+  if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then
+    rm -f "$stf"; echo "❌ prompt temp file not writable." >&2; return 1
+  fi
+  new="$(jq -c --rawfile c "$stf" '.[0].content = $c' <<< "$_messages" 2>/dev/null)"
+  rm -f "$stf"
+  if [[ -z "$new" || "$new" == "null" ]]; then
+    echo "❌ context update failed — mode change takes effect on next start."
+    return 1
+  fi
+  _messages="$new"
+  if [[ -n "${_session_file:-}" ]]; then
+    session_write "$(jq -c -n \
+      --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+      --arg mode "$mode" \
+      '{type:"prompt_mode",ts:$ts,mode:$mode}')" || true
+  fi
+  return 0
+}
+
 cmd_lexpen() {
-  local what="${1:-on}" f="${_lex_home}/prompts/lexpen.md" content sys stf new
+  local what="${1:-on}" f="${_lex_home}/prompts/lexpen.md" content
   case "$what" in
     off|aus|0)
       if [[ -z "${_lexpen_active:-}" ]]; then
@@ -4358,36 +4563,20 @@ LEXPEN_EOF
       content="${content//\$\{_htools_dir\}/$_htools_dir}"
       _system_prompt="$content"$'\n'"${_prompt_ops}"$'\n'"${_prompt_lexpen_guard}"
       _lexpen_active="1"
+      # Modes are exclusive (slot 0 only): /lexpen displaces /lexlurk.
+      if [[ -n "${_lurk_active:-}" ]]; then
+        _lurk_active=""
+        _lurk_open=0
+        echo "  Note: /lexlurk is now off (slot 0 belongs to /lexpen)."
+      fi
       ;;
     *)
       echo "Usage: /lexpen [off] · /lex = back to the original prompt" >&2
       return 1
       ;;
   esac
-  # Context rebuild: replace only slot 0, the history stays untouched.
-  if ! jq -e '((.[0].role // "") == "system")' <<< "$_messages" >/dev/null 2>&1; then
-    setup_messages   # unreachable in the REPL (slot 0 is always system)
-    return 0
-  fi
-  sys="${_system_prompt}$(_wiki_ex)"
-  stf="$(mktemp)" || { echo "❌ cannot create temp file." >&2; return 1; }
-  if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then
-    rm -f "$stf"; echo "❌ prompt temp file not writable." >&2; return 1
-  fi
-  new="$(jq -c --rawfile c "$stf" '.[0].content = $c' <<< "$_messages" 2>/dev/null)"
-  rm -f "$stf"
-  if [[ -z "$new" || "$new" == "null" ]]; then
-    echo "❌ context update failed — mode change takes effect on next start." >&2
-    return 1
-  fi
-  _messages="$new"
-  if [[ -n "${_session_file:-}" ]]; then
-    session_write "$(jq -c -n \
-      --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
-      --arg mode "$([[ -n "$_lexpen_active" ]] && echo lexpen || echo default)" \
-      '{type:"prompt_mode",ts:$ts,mode:$mode}')" || true
-  fi
-  if [[ -n "$_lexpen_active" ]]; then
+  _swap_slot0 "$([[ -n "${_lexpen_active:-}" ]] && echo lexpen || echo default)" || return 0
+  if [[ -n "${_lexpen_active:-}" ]]; then
     echo '✓ System prompt: Lex persona (senior engineer style) active — '"$f"
     echo '  Style: English · title block · "Chief" · ✦ made by @Lex ✦ · /lex = back.'
   else
@@ -4397,9 +4586,157 @@ LEXPEN_EOF
 }
 
 # ---------------------------------------------------------------------------
+# /lexlurk — lurk mode (plan 2026-10-08, user go "lurk mode like /lexpen")
+#   /lexlurk             watcher prompt on (when active: status)
+#   /lexlurk on|off      toggle the mode (slot 0, exclusive with /lexpen)
+#   /lexlurk status      counters + lurk_watch --status
+#   /lexlurk alerts [n]  last n alerts, resets the lexl!N marker
+#   /lexlurk check       trigger the watcher check now (rc1 = alert)
+#   Effects: prompts/lexlurk.md (created on demand) + prompt marker "l" +
+#   watcher tick in read -t (tools/lurk_watch.sh, LEX_LURK_INTERVAL=20s).
+# ---------------------------------------------------------------------------
+
+_lex_watch_path() { # path to lurk_watch.sh (next to the lex script or PATH)
+  # BASH_SOURCE[0]: in the test source context $0 points to the CALLER
+  # (test_features.sh) and "tools/" next to it — not the lex file itself.
+  local d
+  d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P)" || d=""
+  if [[ -n "$d" && -x "$d/tools/lurk_watch.sh" ]]; then
+    printf '%s\n' "$d/tools/lurk_watch.sh"
+    return 0
+  fi
+  command -v lurk_watch.sh 2>/dev/null
+}
+
+_lurk_watch() { # call lurk_watch.sh with an isolated state directory
+  local w
+  w="$(_lex_watch_path)" || { echo "❌ lurk_watch.sh not found (tools/)." >&2; return 1; }
+  LEX_LURK_DIR="${_lex_home}/lurk" "$w" "$@"
+}
+
+cmd_lexlurk() {
+  local what="${1:-auto}" f="${_lex_home}/prompts/lexlurk.md" content out rc
+  if [[ "$what" == "auto" ]]; then
+    if [[ -n "${_lurk_active:-}" ]]; then what="status"; else what="on"; fi
+  fi
+  case "$what" in
+    on|an|1)
+      if [[ -n "${_lurk_active:-}" ]]; then
+        cmd_lexlurk status
+        return 0
+      fi
+      if [[ ! -f "$f" ]]; then
+        mkdir -p "$(dirname "$f")" 2>/dev/null || {
+          echo "❌ ${f%/*} cannot be created — no mode switch." >&2; return 1; }
+        cat > "$f" <<'LURK_EOF'
+# Lex — Lurk Watch (Blue Team watcher)
+
+**LANGUAGE: All answers are in English — title, narration and content. For example titles like "Alarm, checked", "Quiet, Chief". Code, commands and technical identifiers stay as they are.**
+
+## Role
+
+Lex stands in lurk position. He watches the own systems and networks
+for attacks and anomalies, rates them and proposes reactions. Blue Team:
+detection, hardening, clean reports.
+
+## Watcher rules
+
+- **Finding before rating**: first substantiate (log quote, delta, timestamp, source), then severity (critical/high/medium/low) in one sentence.
+- **No alarm without evidence.** False alarms cost trust — a new connection without context is first an INFO (baseline), not panic.
+- **Name the source**: where the message comes from (`/lexlurk alerts`, `~/.lex/lurk/alerts.jsonl`, fail2ban, auth.log, pcap, ss delta).
+- **On a confirmed anomaly** propose the reaction: watch → contain → harden; active countermeasures only on a substantiated attack (guard rule: every kind of defence is then allowed, not before). Tool choice from ${_htools_dir}/WERKSTATT.md and the playbooks in the wiki.
+- **Record incidents**: mem_add(finding) + wiki entry (log.md; for a longer incident an incident article), quote alert lines.
+- **Report form**: finding → rating (severity + source) → next stage (watch/contain/react). Short and factual.
+
+## Boundaries
+
+- No active scans or attacks without cause — an alarm or an order triggers activity, not curiosity.
+- Own systems/lab/CTF/networks (the working framework of the original prompt still applies).
+- Personal OSINT stays taboo (boundary of the original prompt).
+LURK_EOF
+        [[ -f "$f" ]] || { echo "❌ $f is not writable — no mode switch." >&2; return 1; }
+      fi
+      content="$(cat "$f" 2>/dev/null)" || {
+        echo "❌ $f is not readable — no mode switch." >&2; return 1; }
+      [[ -n "$content" ]] || {
+        echo "❌ $f is empty — no mode switch." >&2; return 1; }
+      content="${content//\$\{_wiki_dir\}/$_wiki_dir}"
+      content="${content//\$\{_htools_dir\}/$_htools_dir}"
+      _system_prompt="$content"$'\n'"${_prompt_ops}"
+      # Modes are exclusive (slot 0 only): /lexlurk displaces /lexpen.
+      if [[ -n "${_lexpen_active:-}" ]]; then
+        _lexpen_active=""
+        echo "  Note: /lexpen is now off (slot 0 belongs to /lexlurk)."
+      fi
+      _lurk_active="1"
+      _lurk_open=0
+      if ! _lurk_watch --start; then
+        echo "⚠ watcher baseline not created — /lexlurk check shows why." >&2
+      fi
+      _swap_slot0 lurk || return 0
+      echo "✓ Lurk mode active — watcher prompt, tick every ${LEX_LURK_INTERVAL:-20}s."
+      echo "  Marker: lexl> (open alerts: lexl!N>) · /lexlurk alerts · /lexlurk status"
+      echo "  back: /lexlurk off · /lex = original · /lexpen = engineer persona"
+      ;;
+    off|aus|0)
+      if [[ -z "${_lurk_active:-}" ]]; then
+        echo "✓ Lurk mode is not active."
+        return 0
+      fi
+      _system_prompt="$_system_prompt_default"
+      _lurk_active=""
+      _lurk_open=0
+      _lurk_watch --stop >/dev/null 2>&1 || true
+      _swap_slot0 default || return 0
+      echo "✓ Lurk mode off — original prompt active again (baseline/alerts remain)."
+      ;;
+    status)
+      echo "Lurk: $([[ -n "${_lurk_active:-}" ]] && echo active || echo inactive) · open alerts: ${_lurk_open:-0} · tick: ${LEX_LURK_INTERVAL:-20}s"
+      _lurk_watch --status || true
+      ;;
+    alerts)
+      _lurk_watch --alerts "${2:-10}" || true
+      _lurk_open=0
+      ;;
+    check)
+      out="$(_lurk_watch --check 2>&1)"; rc=$?
+      printf '%s\n' "$out"
+      return "$rc"
+      ;;
+    *)
+      echo "Usage: /lexlurk [on|off|status|alerts [n]|check]" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# One watcher tick (read -t timeout in lurk mode): quiet rc0/rc2, at rc1
+# alert: output at the prompt, bell, desktop notification, counter for lexl!N.
+_lurk_tick() {
+  local out rc n
+  out="$(_lurk_watch --check 2>/dev/null)"
+  rc=$?
+  (( rc == 1 )) || return 0
+  n="$(printf '%s\n' "$out" | grep -c '^ALERT' || true)"
+  n="${n:-0}"
+  _lurk_open=$(( ${_lurk_open:-0} + n ))
+  printf '\n⚠ LURK — %s new alert(s):\n%s\n' "$n" "$out"
+  printf '\a' > /dev/tty 2>/dev/null || true
+  if [[ -z "${LEX_LURK_NO_NOTIFY:-}" ]] && command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical -t 8000 "lex lurk" \
+      "$(printf '%s' "$out" | head -n3)" 2>/dev/null || true
+  fi
+  log "lurk: $n new alerts"
+}
+
+# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
 usage() {
+  local modes="Original"
+  [[ -n "${_lexpen_active:-}" ]] && modes="/lexpen"
+  [[ -n "${_lurk_active:-}" ]] && modes="/lexlurk"
   cat <<EOF
 lex — our own pure-Bash LLM terminal agent (v${LEX_VERSION})
 
@@ -4419,6 +4756,11 @@ Slash commands (REPL):
   /compact            compress context now (keep summary + tail)
   /plan               show the current plan (todo list)
   /lexpen             set system prompt to the Lex persona (senior-engineer style)
+  /lexlurk [on|off|status|alerts [n]|check]
+                      Lurk watch: blue-team lurk mode with watcher rules;
+                      tick every ${LEX_LURK_INTERVAL:-20}s, marker lexl>
+                      (open alerts lexl!N), alerts in ~/.lex/lurk/alerts.jsonl
+  mode currently active: ${modes} (slot 0 is exclusive — one displaces the other)
   /autosudo           automatically answer y/N approvals in the sudo gate (on|off|status)
   /lex                back to the original prompt
   /help               this help
@@ -4440,14 +4782,17 @@ Security:
 Config (4 tiers, ENV overrides):
   defaults -> ~/.lex/settings.json -> .lex/settings.json -> ENV
   ENV: LEX_API_URL, LEX_API_KEY, LEX_MODEL, LEX_MAX_TOKENS, LEX_REASONING_BUDGET,
-       LEX_TEMPERATURE, LEX_MAX_TURNS, LEX_TOOL_TIMEOUT, LEX_TOOL_MAX_OUTPUT,
+       LEX_REASONING_BUDGET_FOLLOWUP, LEX_AUTO_DISABLE_THINKING_WITH_TOOLS,
+       LEX_TEMPERATURE, LEX_MAX_TURNS, LEX_TOOL_TIMEOUT,
+       LEX_TOOL_MAX_OUTPUT,
        LEX_CTX_LIMIT, LEX_COMPACT, LEX_COMPACT_KEEP, LEX_COMPACT_BUFFER,
-       LEX_API_RETRIES, LEX_LOOP_GUARD, LEX_REASONING_STORE_MAX,
+       LEX_API_RETRIES, LEX_LOOP_GUARD, LEX_SILENT_TURNS, LEX_REASONING_STORE_MAX,
        LEX_LOG_DIR, LEX_MOCK, LEX_MOCK_FILE, LEX_APPROVE, LEX_SUDO, LEX_SUDO_APPROVE,
        LEX_AUTOSUDO,
        LEX_SESSION, LEX_MEM_DIR,
        LEX_WIKI_DIR, LEX_HTOOLS_DIR, LEX_TRACE, LEX_SHOW_REASONING, LEX_REASONING_MAX,
-       LEX_MCP, LEX_MCP_TIMEOUT, LEX_SEARCH_URL, LEX_SEARCH_TIMEOUT
+       LEX_TRACE_RESULT_MAX, LEX_MD_CELL_MAX, LEX_MCP, LEX_MCP_TIMEOUT, LEX_SEARCH_URL, LEX_SEARCH_TIMEOUT,
+       LEX_LURK_INTERVAL, LEX_LURK_NO_NOTIFY, LEX_LURK_DIR
 
 Input: Readline (arrow keys, Ctrl-A/E/W/U, tab = path completion),
 History in ~/.lex/history (500 entries).

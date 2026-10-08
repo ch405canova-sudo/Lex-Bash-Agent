@@ -189,6 +189,27 @@ fi
 eval "$_sudo_ticket_save"
 _sudo=1
 
+# #40 (2026-10-08): permission errors → sudo bridge. Session 030808: 10×
+# "Keine Berechtigung"/Permission denied, lex never asked for root, the
+# model gave up the task (chmod never executed). The nudge only comes for
+# commands WITHOUT the sudo word (the paths without an ask) — ask text +
+# prompt rule as static anchors, the ask itself cannot be behaviour-tested
+# here (waiting would block on the password entry at the TTY).
+if [[ ! -r /root ]]; then
+  out="$(tool_bash 'ls /root' 2>&1)"
+  contains "permission error (nudge names sudo)" "missing rights" "$out"
+  contains "permission error (nudge names terminal)" "user's terminal" "$out"
+else
+  printf '  [SKIP] permission nudge (running as root — /root readable)\n'
+fi
+if grep -Fq 'if [[ "$command" != *"sudo "* ]]; then' "$LEX_BIN" \
+  && grep -Fq 'missing rights: if root helps' "$LEX_BIN" \
+  && grep -Fq 'type the password into the sudo prompt at the terminal' "$LEX_BIN" \
+  && grep -Fq 'Do NOT give up the task because of it' "$LEX_BIN"; then
+  check "sudo bridge (nudge gate + ask text + prompt rule)" "1"
+else
+  check "sudo bridge (nudge gate + ask text + prompt rule)" "0"
+fi
 
 out="$(tool_bash 'echo safe')"
 assert "bash (harmless runs)" "safe" "$out"
@@ -448,7 +469,7 @@ assert "write_file (new file 644 with umask 022)" "644" "$mode"
 # /status
 # ---------------------------------------------------------------------------
 out="$(printf '/status' | LEX_MOCK="done" "$LEX_BIN" --oneshot 2>/dev/null)"
-contains "/status (Version)" "lex 0.1.0" "$out"
+contains "/status (Version)" "lex 0.2.0" "$out"
 contains "/status (mode)" "mode" "$out"
 contains "/status (mode=mock)" ": mock" "$out"
 contains "/status (mem path)" "$LEX_MEM_DIR" "$out"
@@ -457,11 +478,22 @@ out="$("$LEX_BIN" --status 2>/dev/null)"
 contains "--status (mode=live)" ": live" "$out"
 contains "--status (approve default 0)" "approve: 0" "$out"
 
-# reasoning_budget: since 2026-09-29 (limits review "large tasks") twice as
-# high — 4096 caused finish=length aborts on long answers.
+# reasoning_budget: adaptive since 2026-10-07 (overthinking optimisation
+# after A/B comparison A0-A3): first turn 2048, follow-up turns 768 — before
+# that a static 8192, which produced ~1000 thinking tokens even for mini turns.
 load_config
-assert "reasoning_budget (default high 8192)" "8192" "$_reasoning_budget"
-contains "--status (budget 8192)" "8192" "$out"
+assert "reasoning_budget (first turn 2048)" "2048" "$_reasoning_budget"
+assert "reasoning_budget_followup (follow-up turn 768)" "768" "$_reasoning_budget_followup"
+contains "--status (budget 2048)" "2048" "$out"
+
+# Lever 2 (2026-10-07): auto_disable_thinking_with_tools — default off
+# (template default, unchanged behaviour), ENV/config switch it on.
+assert "adwt (default off)" "off" "${_auto_disable_thinking_with_tools:-}"
+LEX_AUTO_DISABLE_THINKING_WITH_TOOLS=on load_config
+assert "adwt (ENV on)" "on" "$_auto_disable_thinking_with_tools"
+LEX_AUTO_DISABLE_THINKING_WITH_TOOLS=off load_config
+assert "adwt (ENV back off)" "off" "$_auto_disable_thinking_with_tools"
+contains "--status (adwt visible)" "auto_disable_with_tools: off" "$("$LEX_BIN" --status 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # §6 #9 — --install creates mem/ (not mem_net/)
@@ -652,6 +684,25 @@ contains "--status (htools line)" "htools" "$("$LEX_BIN" --status 2>/dev/null)"
 contains "help (ENV LEX_HTOOLS_DIR)" "LEX_HTOOLS_DIR" "$("$LEX_BIN" --help 2>/dev/null)"
 contains "prompt (playbook reference)" "security-playbook" "$_system_prompt"
 contains "prompt (playbook create needle)" "playbook-erstellen" "$_system_prompt"
+contains "prompt (workshop procedure: index)" "WERKSTATT.md" "$_system_prompt"
+contains "prompt (workshop procedure: quick techniques)" "schnelltechniken" "$_system_prompt"
+contains "prompt (workshop procedure: auto script)" "werkstatt_index.sh" "$_system_prompt"
+# workshop index auto script (tools/werkstatt_index.sh)
+_wi="$(dirname "$LEX_BIN")/tools/werkstatt_index.sh"
+assert "werkstatt_index (script present)" "1" "$([[ -f "$_wi" ]] && echo 1 || echo 0)"
+_wiout="$(LEX_HTOOLS_DIR=/nonexistent-ht bash "$_wi" --check 2>/dev/null)"
+assert "werkstatt_index (--check rc=0)" "0" "$?"
+contains "werkstatt_index (--check: marker)" "AUTO-START" "$_wiout"
+contains "werkstatt_index (--check: subfinder line)" "subfinder" "$_wiout"
+_wid="$(mktemp -d)"
+mkdir -p "$_wid/ht"
+printf 'Head\n<!-- AUTO-START -->\nold\n<!-- AUTO-END -->\nFoot\n' > "$_wid/ht/WERKSTATT.md"
+LEX_HTOOLS_DIR="$_wid/ht" bash "$_wi" >/dev/null 2>&1
+assert "werkstatt_index (write mode rc=0)" "0" "$?"
+assert "werkstatt_index (placeholder replaced)" "0" "$(grep -c '^old$' "$_wid/ht/WERKSTATT.md" || true)"
+assert "werkstatt_index (marker exactly 1×)" "1" "$(grep -cF '<!-- AUTO-START -->' "$_wid/ht/WERKSTATT.md" || true)"
+assert "werkstatt_index (foot kept)" "1" "$(grep -c '^Foot$' "$_wid/ht/WERKSTATT.md" || true)"
+rm -rf "$_wid"
 
 # ---------------------------------------------------------------------------
 # Step 2 — planning: todo (add/done/list) + /plan
@@ -901,6 +952,10 @@ assert "feedback (empty return → nothing)" "" "$out"
 big=""
 for i in $(seq 1 12); do big+="$i"$'\n'; done
 err="$(LEX_TRACE=1 _trace_result bash "$big" 2>&1 >/dev/null)"
+contains "feedback (default: all 12 lines)" "    12" "$err"
+assert "feedback (default: no truncation message)" "0" \
+  "$([[ "$err" == *"lines total"* ]] && echo 1 || echo 0)"
+err="$(LEX_TRACE=1 LEX_TRACE_RESULT_MAX=8 _trace_result bash "$big" 2>&1 >/dev/null)"
 contains "feedback (cap with line count)" "12 lines total" "$err"
 err="$(_trace_result bash 'without trace' 2>&1 >/dev/null)"
 assert "feedback (off without LEX_TRACE/TTY)" "" "$err"
@@ -914,6 +969,12 @@ err="$(LEX_TRACE=1 LEX_SHOW_REASONING=0 _trace_reasoning 'blubb' 2>&1 >/dev/null
 assert "reasoning (LEX_SHOW_REASONING=0 → stderr empty)" "" "$out$err"
 err="$(LEX_TRACE=1 LEX_REASONING_MAX=5 _trace_reasoning '0123456789' 2>&1 >/dev/null)"
 contains "reasoning (truncation)" "truncated" "$err"
+# Default = complete (LEX_REASONING_MAX=0): long dump without truncation
+long_r="$(printf 'Y%.0s' $(seq 1 5000))"
+err="$(LEX_TRACE=1 _trace_reasoning "$long_r" 2>&1 >/dev/null)"
+assert "reasoning (default: no truncation)" "0" \
+  "$([[ "$err" == *truncated* ]] && echo 1 || echo 0)"
+contains "reasoning (default: full text)" "$long_r" "$err"
 err="$(_trace_reasoning 'invisible' 2>&1 >/dev/null)"
 assert "reasoning (off without LEX_TRACE/TTY)" "" "$err"
 
@@ -1025,12 +1086,29 @@ contains "table (right aligned)" $'\033[1;36mValue' "$out"
 widths="$(printf '%s\n' "$out" | sed $'s/\x1b\\[[0-9;]*m//g' | while IFS= read -r l; do printf '%s\n' "$l" | LC_ALL=C.utf8 wc -m; done | sort -u | wc -l | tr -d ' ')"
 assert "table (rows same width, UTF-8)" "1" "$widths"
 
-# A too-wide cell is truncated instead of wrapped
+# Full cell: default LEX_MD_CELL_MAX=0 cuts nothing (user request
+# "I want to see everything") — and LEX_MD_CELL_MAX>0 still caps.
 long='| Short | '"$(printf 'X%.0s' $(seq 1 60))"' |
 |---|---|
 | a | b |'
 out="$(printf '%s\n' "$long" | render_markdown_force)"
-contains "table (truncation with …)" "…" "$out"
+assert "table (default: no …)" "0" \
+  "$([[ "$out" == *"…"* ]] && echo 1 || echo 0)"
+contains "table (default: 60 X complete)" "$(printf 'X%.0s' $(seq 1 60))" "$out"
+out="$(printf '%s\n' "$long" | LEX_MD_CELL_MAX=20 render_markdown_force)"
+contains "table (LEX_MD_CELL_MAX=20 truncates)" "…" "$out"
+
+# O1: escaped pipe `\|` in a cell is content (GFM), not a separator —
+# otherwise the following columns shift right and the row widths break.
+esc='| A | B |
+|---|---|
+| `x\|y` | ok |'
+out="$(printf '%s\n' "$esc" | render_markdown_force)"
+out="$(printf '%s' "$out" | sed $'s/\x1b\\[[0-9;]*m//g')"
+contains "table (escaped pipe stays content)" 'x|y' "$out"
+row="$(printf '%s\n' "$out" | grep 'ok')"
+np="$(printf '%s' "$row" | tr -cd '│' | wc -m | tr -d ' ')"
+assert "table (escaped pipe: 2 columns)" "3" "$np"
 
 # Coloured signal lines
 out="$(printf '> **NOTE:** care needed\n> normal quote\n❌ broken\nError: read failed\n✓ done\n- item\n---\n[Page](https://example.com/x) view' | render_markdown_force)"
@@ -1499,6 +1577,8 @@ contains "split (ops: verification rule)" "You verify with tools, not in your he
   "$_prompt_ops"
 contains "split (ops: research rule)" "Never guess, look it up" \
   "$_prompt_ops"
+contains "split (ops: stop rule)" "Thinking has an end" "$_prompt_ops"
+contains "split (ops: source chain)" "Substantiate or name it" "$_prompt_ops"
 contains "split (ops: tool list)" "You have 17 tools" "$_prompt_ops"
 contains "split (ops: wiki rule)" "Your wiki is your memory" \
   "$_prompt_ops"
@@ -1522,10 +1602,14 @@ contains "lexpen (status message)" "Lex persona" "$out"
 # Ops layer stays in the lexpen context (finding 2026-10-05: 0 tool calls)
 contains "lexpen (ops: verification rule)" "You verify with tools, not in your head" "$sysc"
 contains "lexpen (ops: research rule)" "Never guess, look it up" "$sysc"
+contains "lexpen (ops: stop rule)" "Thinking has an end" "$sysc"
+contains "lexpen (ops: source chain)" "Substantiate or name it" "$sysc"
 contains "lexpen (ops: tool list)" "You have 17 tools" "$sysc"
 assert "lexpen (ops newline-separated)" "1" \
   "$([[ "$sysc" == *$'\n- **You verify with tools'* ]] && echo 1 || echo 0)"
 contains "lexpen (anti-refusal guard)" "Requests are carried out, not refused" "$sysc"
+contains "lexpen (guard: every kind of defence)" "every kind of defence and countermeasure is allowed" "$sysc"
+contains "lexpen (guard: playbook §1 exception)" "NOT to reacting to a substantiated attack" "$sysc"
 assert "lexpen (style marker replaced)" "0" \
   "$([[ "$sysc" == *"ALWAYS in English"* ]] && echo 1 || echo 0)"
 
@@ -1565,6 +1649,127 @@ contains "usage (mentions /lexpen)" "/lexpen" "$out"
 contains "usage (mentions /lex)" "/lex " "$out"
 out="$(cmd_status)"
 contains "status (prompt line standard)" "prompt    : standard" "$out"
+
+# ---------------------------------------------------------------------------
+# /lexlurk — lurk mode / watcher (plan 2026-10-08, user go "lurk mode like
+# /lexpen + /help overview"). Like cmd_lexpen: do NOT call in $().
+# ---------------------------------------------------------------------------
+setup_messages
+assert "lurk (flag initially off)" "" "${_lurk_active:-}"
+assert "lurk (open alert counter initially)" "" "${_lurk_open:-}"
+
+cmd_lexlurk on > "$TMP/lurk.out" 2>&1
+assert "lurk (on: rc)" "0" "$?"
+out="$(cat "$TMP/lurk.out")"
+assert "lurk (prompt file created)" "1" \
+  "$([[ -s "$LEX_HOME/prompts/lexlurk.md" ]] && echo 1 || echo 0)"
+assert "lurk (baseline created)" "1" \
+  "$([[ -s "$LEX_HOME/lurk/baseline.ts" ]] && echo 1 || echo 0)"
+sysc="$(jq -r '.[0].content' <<< "$_messages")"
+contains "lurk (persona in context)" "Lurk Watch" "$sysc"
+contains "lurk (language rule in persona)" "All answers are in English" "$sysc"
+contains "lurk (watcher rule)" "Finding before rating" "$sysc"
+contains "lurk (no alarm without evidence)" "No alarm without evidence" "$sysc"
+contains "lurk (ops stay)" "You verify with tools, not in your head" "$sysc"
+contains "lurk (status message)" "Lurk mode active" "$out"
+assert "lurk (flag set)" "1" "${_lurk_active:-}"
+assert "lurk (placeholder ${_htools_dir} expanded)" "0" \
+  "$([[ "$sysc" == *'${_htools_dir}'* ]] && echo 1 || echo 0)"
+
+# Exclusivity of the prompt modes (slot 0): one displaces the other
+cmd_lexpen on > "$TMP/lurk2.out" 2>&1
+assert "lurk (displaced by /lexpen)" "" "${_lurk_active:-}"
+assert "lurk (lexpen after takeover)" "1" "${_lexpen_active:-}"
+contains "lurk (hint on takeover)" "slot 0 belongs to /lexpen" \
+  "$(cat "$TMP/lurk2.out")"
+cmd_lexlurk on > "$TMP/lurk3.out" 2>&1
+assert "lurk (displaces /lexpen)" "" "${_lexpen_active:-}"
+assert "lurk (active again)" "1" "${_lurk_active:-}"
+contains "lurk (hint on lexpen displacement)" "slot 0 belongs to /lexlurk" \
+  "$(cat "$TMP/lurk3.out")"
+
+# Prompt marker: lexl> while active, lexl!N> with open alerts
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+  source "$2" "" </dev/null >/dev/null 2>&1; _lurk_active=1; _prompt' \
+  _ "$TMP" "$LEX_BIN" 2>&1)"
+assert "lurk (prompt marker lexl>)" "lexl> " "$out"
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+  source "$2" "" </dev/null >/dev/null 2>&1; _lurk_active=1; _lurk_open=3; _prompt' \
+  _ "$TMP" "$LEX_BIN" 2>&1)"
+assert "lurk (marker with alerts lexl!3>)" "lexl!3> " "$out"
+
+# off
+cmd_lexlurk off > "$TMP/lurk.out" 2>&1
+assert "lurk (off: rc)" "0" "$?"
+contains "lurk (off: message)" "original prompt active again" \
+  "$(cat "$TMP/lurk.out")"
+assert "lurk (flag reset)" "" "${_lurk_active:-}"
+sysc="$(jq -r '.[0].content' <<< "$_messages")"
+contains "lurk (back: original prompt)" "You are Lex" "$sysc"
+cmd_lexlurk off > "$TMP/lurk.out" 2>&1
+contains "lurk (2nd off: hint)" "is not active" "$(cat "$TMP/lurk.out")"
+
+# status + auto (bare /lexlurk without argument)
+cmd_lexlurk status > "$TMP/lurk.out" 2>&1
+contains "lurk (status: inactive)" "Lurk: inactive" "$(cat "$TMP/lurk.out")"
+cmd_lexlurk on >/dev/null 2>&1
+cmd_lexlurk status > "$TMP/lurk.out" 2>&1
+contains "lurk (status: active)" "Lurk: active" "$(cat "$TMP/lurk.out")"
+out="$(cmd_status)"
+contains "lurk (/status prompt line)" "lurk (lurk watcher" "$out"
+cmd_lexlurk off >/dev/null 2>&1
+
+# /help overview of the modes
+out="$(usage)"
+contains "usage (mentions /lexlurk)" "/lexlurk [on|off|status|alerts [n]|check]" "$out"
+contains "usage (mentions watcher rules)" "watcher rules" "$out"
+contains "usage (mode line)" "mode currently active" "$out"
+
+# Slash patterns in oneshot (isolated LEX_HOME, no request)
+out="$(printf '/lexlurk on' | LEX_MOCK="done" LEX_HOME="$TMP/lurkslash" \
+  "$LEX_BIN" --oneshot 2>&1)"
+contains "lurk slash (oneshot on)" "Lurk mode active" "$out"
+out="$(printf '/lexlurk status' | LEX_MOCK="done" LEX_HOME="$TMP/lurkslash" \
+  "$LEX_BIN" --oneshot 2>&1)"
+contains "lurk slash (oneshot status)" "Lurk: inactive" "$out"
+
+# lurk_watch.sh — watcher rules (delta detection, report only once)
+WATCH="$LEX_DIR/tools/lurk_watch.sh"
+assert "lurk-watch (script present + executable)" "1" \
+  "$([[ -x "$WATCH" ]] && echo 1 || echo 0)"
+FX="$TMP/lurkfx"; mkdir -p "$FX"
+export LEX_LURK_DIR="$FX/state" LEX_LURK_FAIL2BAN_LOG="$FX/fb.log" \
+  LEX_LURK_AUTH_LOG="$FX/au.log"
+printf '[j] Ban 1.1.1.1\n' > "$LEX_LURK_FAIL2BAN_LOG"
+printf 'ok\n' > "$LEX_LURK_AUTH_LOG"
+"$WATCH" --start >/dev/null 2>&1; rc=$?
+check "lurk-watch (start rc0)" "$(( rc == 0 ? 1 : 0 ))"
+"$WATCH" --check >/dev/null 2>&1; rc=$?
+check "lurk-watch (quiet: rc0)" "$(( rc == 0 ? 1 : 0 ))"
+printf '[j] Ban 6.6.6.6\n' >> "$LEX_LURK_FAIL2BAN_LOG"
+out="$("$WATCH" --check 2>&1)"; rc=$?
+check "lurk-watch (ban delta: rc1)" "$(( rc == 1 ? 1 : 0 ))"
+contains "lurk-watch (alert output)" "ALERT [HIGH] fail2ban" "$out"
+"$WATCH" --check >/dev/null 2>&1; rc=$?
+check "lurk-watch (alert only once: rc0)" "$(( rc == 0 ? 1 : 0 ))"
+contains "lurk-watch (alerts persisted)" "fail2ban" \
+  "$("$WATCH" --alerts 5 2>&1)"
+out="$(LEX_LURK_DIR="$FX/leer" "$WATCH" --check 2>&1)"; rc=$?
+check "lurk-watch (without baseline: rc2)" "$(( rc == 2 ? 1 : 0 ))"
+contains "lurk-watch (baseline hint)" "run --start first" "$out"
+out="$(LEX_LURK_DIR="$FX/leer" "$WATCH" --status 2>&1)"
+contains "lurk-watch (status without baseline)" "no baseline" "$out"
+unset LEX_LURK_DIR LEX_LURK_FAIL2BAN_LOG LEX_LURK_AUTH_LOG
+
+# Static anchors: tick loop, desktop gate, timeout read
+grep -q 'read -t "${LEX_LURK_INTERVAL:-20}" -e' "$LEX_BIN"; rc=$?
+check "lurk (read -t with interval in loop)" "$(( rc == 0 ? 1 : 0 ))"
+grep -q '_lurk_tick' "$LEX_BIN"; rc=$?
+check "lurk (_lurk_tick wired in)" "$(( rc == 0 ? 1 : 0 ))"
+grep -q 'LEX_LURK_NO_NOTIFY' "$LEX_BIN"; rc=$?
+check "lurk (notify gate present)" "$(( rc == 0 ? 1 : 0 ))"
+grep -q 'notify-send' "$LEX_BIN"; rc=$?
+check "lurk (notify-send used)" "$(( rc == 0 ? 1 : 0 ))"
 
 # ---------------------------------------------------------------------------
 # Step 51 — hard session permissions (umask-proof: sessions/ 700, dir 700,
@@ -1706,6 +1911,14 @@ unset LEX_REASONING_STORE_MAX
 _session_file=""
 _ctx_limit="$save_ctx"; _compact="$save_compact"; _messages="$save_msgs"
 _compact_warned=0
+
+# §8 D: Bash >= 4 — guard against Bash 3.2 (coproc is a Bash-4.0 reserved word)
+_gln="$(grep -n 'BASH_VERSINFO\[0\] < 4' "$LEX_BIN" | head -1 | cut -d: -f1)"
+_cln="$(grep -n 'coproc MCPSRV' "$LEX_BIN" | head -1 | cut -d: -f1)"
+check "Bash>=4 guard present (§8 D)" "$([[ -n "$_gln" ]] && echo 1 || echo 0)"
+check "guard stands before coproc (§8 D)" "$([[ -n "$_gln" && -n "$_cln" && "$_gln" -lt "$_cln" ]] && echo 1 || echo 0)"
+check "README mentions Bash >= 4" "$(grep -qE 'Bash (≥|>=) 4' "$(dirname "$LEX_BIN")/README.md" && echo 1 || echo 0)"
+unset _gln _cln
 
 if (( FAIL > 0 )); then
   echo "FAILED: $FAIL test(s) in test_features.sh" >&2

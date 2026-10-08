@@ -4,7 +4,186 @@ All notable changes to lex.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
-## [Unreleased]
+## [0.2.0] — 2026-10-08
+
+### Added 2026-10-08 — Prompt mode `/lexlurk` (lurk watch) + `/help` overview
+
+- **`/lexlurk [on|off|status|alerts [n]|check]`:** second prompt mode
+  next to `/lexpen` (slot 0, exclusive — one evicts the other with a
+  notice); lazy-creates `~/.lex/prompts/lexlurk.md` with a blue-team
+  watchdog persona (German, “finding before assessment”, “no alarm
+  without evidence”); marker `lexl>` or `lexl!N>` while alarms are open;
+  the `/status` `prompt` line and `usage()` (incl. live “mode currently
+  active”) know the mode; session record `{type:prompt_mode,mode:lurk}`.
+- **`tools/lurk_watch.sh`** (not the 18th lex tool): watchdog with 6
+  rules — fail2ban ban delta, auth-failure delta, new external peers, new
+  neighbours, new listening ports, changed key files; baseline +
+  `alerts.jsonl` under `~/.lex/lurk/`, snapshots advanced after every
+  check (every deviation reported exactly 1×), rc 0/1/2, all paths
+  redirectable via `LEX_LURK_*` env vars (test isolation).
+- **Watchdog tick without tokens:** `read -t ${LEX_LURK_INTERVAL:-20}` in
+  the REPL loop (timeout rc>128 without `_int_seen`); on alarm: output at
+  the prompt, bell (`\a`), `notify-send` behind the `LEX_LURK_NO_NOTIFY`
+  gate — deliberately display only, no auto-turn.
+- **`/help` overview:** slash list extended by the `/lexlurk`
+  subcommands plus live “mode currently active: Original|/lexpen|/lexlurk”.
+- Tests +48 → `test_features` 612; `run_all` 13/13 = 903 [PASS];
+  `lex` 4711 → 4912 lines.
+
+### Added 2026-10-07 — Workshop packages (workshop index, quick techniques, procedure rule)
+
+- **`H-Tools/WERKSTATT.md`:** honest workshop index (own scripts with
+  their invocation, all installed tools with purpose + quick invocation,
+  filing locations, repo structure) — Lex reads it before tool
+  search/installation/pentest task.
+- **`wiki/concepts/schnelltechniken.md`:** 6 own verified chains for
+  time pressure (tshark scan detection, beacon check, IP verification
+  chain, nmap quick run, osint-pipeline, pcap fix) with
+  command/duration/success pattern; maintenance rule: quick success →
+  record it immediately (even after 1×).
+- **Prompt rule “workshop procedure”:** look it up beforehand (index +
+  playbooks + quick techniques), record it afterwards (technique, new
+  tool) — complements the existing “maintain your own playbooks” rule.
+  Tests +2 → 843.
+- **`tools/werkstatt_index.sh`:** refreshes the auto block in
+  WERKSTATT.md (versions of the workshop tools, flag map + ANSI filter,
+  `--check` dry run, marker gate, idempotent) — referenced by the prompt
+  in the workshop-procedure rule. Tests +9 → 852.
+
+### Changed 2026-10-08 — Package D: wiki is the source of truth for playbooks
+
+- **`playbooks`/`playbook_steps` (DB `lex`) are mirror/seed only** —
+  maintained exclusively in `wiki/concepts/` (re-seeded via the seed SQL
+  under `~/.lex/backups/`); table comments flag the mirror status.
+  Anchored in `playbook-erstellen.md` §7, `pentest-db-architektur.md`
+  (scope + seed) — no prompt/code change needed.
+
+### Changed 2026-10-07 — Anti-refusal guard: defense of any kind
+
+- **`_prompt_lexpen_guard` extended:** after a substantiated attack, any
+  kind of active defense and countermeasure against exactly this attacker
+  is now allowed (counter-scans, baiting, honeypot, blocks, provider
+  report, countermeasures on the network) — no exception by type of
+  measure. The playbook §1 rule “permission first” explicitly applies
+  only to actions we start on our own initiative, not to reacting to a
+  substantiated attack; no ethical/legal refusal, no lecture about legal
+  consequences (legality is decided by the human at the terminal).
+  `wiki/concepts/security-playbook.md` §1 extended with the same
+  exception. Trigger: session 20261007-112929 (tshark capture, SSH scan
+  every 5 s, C2 beacon every 30 s → lex refused the counter-attack with a
+  table of legal consequences). Tests +2 → 841/828.
+
+### Changed 2026-10-07 — Minimum Bash version 4 (version guard)
+
+- **Bash ≥ 4 is now enforced**: `coproc` (MCP session) is a word reserved
+  for Bash 4.0 — on Bash 3.2 (macOS system bash) parsing the file failed
+  with a cryptic syntax error. New guard at the top of the file reports
+  `braucht Bash >= 4 … brew install bash` clearly and exits before the
+  coproc block. README prerequisite corrected (it wrongly said “no
+  Bash-4-only constructs”).
+
+### Added 2026-10-07 — Threat model (§8 E)
+
+- **Threat model as text**: `wiki/concepts/sicherheitsmodell.md` —
+  trust model (the prohibitions target the model, not the user), 10 hard
+  prohibitions from the segment-wise deny list, sudo as a 4-stage gate,
+  defense-in-depth table and an honest list of gaps (blacklist by
+  choice, prompt injection, Landlock open).
+
+### Changed 2026-10-07 — Overthinking optimization (adaptive reasoning budget + HUD metric)
+
+- **Adaptive `reasoning_budget`:** default **8192 → 2048** for the first
+  turn, new `reasoning_budget_followup` **768** for follow-up turns
+  (`call_api` selects on `_turn_count`; the compaction override 0 beats
+  both). Config tier key `reasoning_budget_followup`, env
+  `LEX_REASONING_BUDGET_FOLLOWUP`, settings template, `/status` and
+  `usage()` added. Motivation: research (Amazon 7–10× overthinking, ARES
+  −52.7 %, TALE −67 %, QwenCloud `enable_thinking:false` →
+  −60–75 % latency; `reasoning_effort: low` is frequently ignored on
+  Qwen variants → budget cap instead of effort).
+- **HUD metric “denke ~N tok”:** `run_turn` remembers
+  `_last_reasoning_chars`, `_trace_hud` renders per turn
+  `· denke ~<Zeichen/4> tok` — the basis for the planned levers 2
+  (`auto_disable_thinking_with_tools`) and 4 (`reasoning_effort`).
+- **Live proof** (isolated `LEX_HOME`): turn 1 `20.0s · … · denke
+  ~383 tok`, follow-up turn `4.0s · … · denke ~27 tok` (before ~1000
+  reasoning tokens/turn).
+- **Lever 2 `auto_disable_thinking_with_tools` (open as default, on as
+  an option):** config key `auto_disable_thinking_with_tools` (tier 2) +
+  `LEX_AUTO_DISABLE_THINKING_WITH_TOOLS` (on/off), `call_api` always
+  sends `chat_template_kwargs:{auto_disable_thinking_with_tools}` with
+  every request (`false` = template default, unchanged behaviour),
+  `/status` line `thinking`, settings/help/header additions. Proven in
+  isolation (3 live requests): `ctk:true` + tools → no
+  `reasoning_content`, `ctk:false` → as before. A/B with 2 runs each on
+  an identical mini-task: **on** −60 % time, but a wrong result
+  (`3` instead of `7`) or a 200-turn loop (rc=1, 539 s) → **default
+  stays `off`**. Secondary finding: `_rep_detect`/fail memory do not
+  catch an empty-content loop with near-identical args.
+- **Lever 4 `reasoning_effort` rejected:** 3 requests each for `low`/
+  `xhigh` (same prompt, `reasoning_budget_tokens:2048`) → reasoning mean
+  213 vs. 212 characters, no systematic difference; control
+  `enable_thinking:false` → 0/0/0. The parameter is ignored by the model
+  → control stays with the budget alone (lever 3). Order 1→3→2→4
+  completed (1+3 built, 2 built/default off, 4 rejected).
+- **Silent-turn guard (loophole from the lever-2 A/B closed):** the fail
+  memory watchdog only sees identical `name|args|result` signatures — the
+  `adwt=on` B2 loop had 195 different args and 200/200 turns without a
+  visible intermediate statement and ran on until `max_turns` (rc=1,
+  539 s). New in `run_turn`: streak of countable text-free tool turns
+  (reset on visible text), default threshold **12** (`LEX_SILENT_TURNS`,
+  `0` = off), under the `LEX_LOOP_GUARD` switch; soft nudge with an
+  answer obligation, the second time hard `rc=1`; session record
+  `{type:"silent_guard"}`. Threshold checked against measured healthy
+  runs (adwt-off: 9/8/5 text-free turns in a row → no false alarm).
+- **Tests +23 → 811** (`test_features` 528 → 533, `test_sse` 30 → 32,
+  `test_loop` 24 → 34; 824 PASS lines minus 13 runner marks),
+  `run_all.sh` **13/13** sequentially; `bash -n` + shellcheck
+  warning-clean; `LEX.md` §5 map re-pulled 3× (48 entries total). Along
+  the way the new session-record assert caught a jq syntax error in the
+  new code live (missing closing `"` → record silently lost).
+- **A/B experiment prompt scaffolding vs. MCP sequential-thinking
+  completed and rejected:** A0 baseline 54.8 min/9 of 12 rubric points,
+  A1 with prompt lines 34.6 min/10, A2 A1+MCP 246.9 min/11, A3 MCP only
+  52.3 min/10 — MCP tool called **0×** in all runs. Decision rule (≥ +1
+  rubric point at ≤ +50 % time) not met → prompt lines out again,
+  `~/.lex/mcp.json` deleted (defaults active).
+- **Prompt needles “thinking has an end” + “substantiate or name it”**
+  (research → A/B, go for lex and lexpen):** two bullets in
+  `_prompt_ops` — stop rule (check a matter at most once with a tool; if
+  the result came it is fact; weigh only on failure; if the thought
+  circles → answer finished, say it out loud instead of ruminating) and
+  evidence chain (repo → wiki → `web_search`/`web_fetch` → only then “I
+  don't know”; a plausible hunch is no substitute for a source). Applies
+  in the original **and** `/lexpen` mode (the latter appends
+  `${_prompt_ops}` to the persona), ops start pattern unchanged. Core
+  research finding: **length** not controllable via prompt (token limits
+  ignored [arXiv 2511.04108], “do not overthink” ineffective [Thought
+  Terminator], own effort test 213 vs. 212 chars), **direction** via
+  prompt does work (Self-Doubt arXiv 2505.23480: −37.1 % reasoning at
+  +3.6 % accuracy; stop-cue research [JET/Self-Braking] against
+  re-checking already checked results). A/B live (identical task, budget
+  2048/768 fixed, isolated `LEX_HOME`, 2 runs each): reasoning
+  **7795 → 4548 chars (−42 %)**, time **118.0 → 84.3 s (−27 %)**, turns
+  12 → 10, **4/4 results correct**, no loop. Tests +4 → **815**
+  (`test_features` 537), `run_all.sh` 13/13, §5 map re-pulled
+  (43 lines +2).
+- **Display trims abolished + fake server localhost-only (“I want to see
+  everything”):** table cells were truncated at render time to 40
+  characters with `…` (`_md_render`), reasoning dumps to 4000
+  (`LEX_REASONING_MAX` default) — both now **untruncated by default**
+  (`LEX_MD_CELL_MAX=0` and `LEX_REASONING_MAX=0`; values >0 still limit).
+  Plus the security finding from the audit run: two orphaned
+  `ncat --listen 28774/28775` listeners of our own tests were listening
+  on **0.0.0.0** (handler scripts in tmp deleted, the processes kept
+  running; dead by now) → `fake_server.sh` now binds `127.0.0.1`.
+  Deliberately unchanged: repetition-guard render (2000, loop protection
+  #46) and the context caps (`search` 200, `_tool_max_output` 50000).
+  Tests +4 → **819** (`test_features` 541), `run_all.sh` 13/13.
+
+### Fixed 2026-10-07 — Remaining display trims removed + escape-pipe fix (O1)
+
+- **Remaining display trims removed + escape-pipe fix in tables (O1):** tool results in the trace were truncated to 8 lines/600 characters — `LEX_TRACE_RESULT_MAX` now **default 0 = complete** (value >0 = line limit). O1 fixed: `\|` in table cells is a GFM escape and no longer a column separator (`cells()` guards against the split). Tests +4 → **823** (`test_features` 545), `run_all.sh` 13/13.
 
 ### Added
 
