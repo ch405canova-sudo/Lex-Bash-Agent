@@ -158,7 +158,12 @@ _sudo_gate 'sudo true' || true
 assert "sudo (reason: LEX_SUDO=0)" "sudo disabled (LEX_SUDO=0)" "$_sudo_gate_reason"
 
 # Branch WITHOUT a valid ticket and WITHOUT a TTY: must refuse, never execute.
-if sudo -n true 2>/dev/null; then
+# The ticket state is SIMULATED — otherwise the check depends on the machine's
+# sudoers (finding 2026-10-06: the NOPASSWD entry was removed → the branch
+# silently moved and the assertions, hence the count, changed with it).
+_sudo_ticket_save="$(declare -f _sudo_ticket_valid)"
+_sudo_ticket_valid() { return 1; }
+if _sudo_ticket_valid; then
   printf '  [SKIP] sudo gate (valid sudo ticket — only the y/N question would appear)\n'
   _sudo=1
 elif _tty_ok; then
@@ -181,6 +186,7 @@ else
     check "sudo gate without TTY (reason names TTY)" "0"
   fi
 fi
+eval "$_sudo_ticket_save"
 _sudo=1
 
 
@@ -260,7 +266,11 @@ else
   check "session grant (no → state declined → y/N)" "0"
 fi
 
-if sudo -n true 2>/dev/null; then
+# Ticket state SIMULATED (valid) — this branch must not depend on the
+# machine's sudoers (finding 2026-10-06, see the sudo gate above).
+_sudo_ticket_save="$(declare -f _sudo_ticket_valid)"
+_sudo_ticket_valid() { return 0; }
+if _sudo_ticket_valid; then
   _sudo=1; _sudo_approve=1; _autosudo=0
   _sudo_grant="1"
   if _sudo_gate 'sudo -n true'; then
@@ -305,6 +315,7 @@ if sudo -n true 2>/dev/null; then
 else
   printf '  [SKIP] session-grant states (sudo ticket not valid — only static checks)\n'
 fi
+eval "$_sudo_ticket_save"
 
 # ---------------------------------------------------------------------------
 # §6.5 — session JSONL + reasoning only in the session (not in the context)

@@ -338,6 +338,28 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   `$LEX_HOME/browser.pid`). click/type send `target` (= ref id) as
   schema ≥0.0.83 requires.
 
+### Changed/Fixed 2026-10-06 — sudo password back, Postgres libs, deterministic counts
+
+- **sudo password visible again (user order “undo it”)**: the machine-wide
+  `/etc/sudoers.d/90-chaos` (`chaos ALL=(ALL) NOPASSWD:ALL`) created on
+  2026-10-03 was removed — `sudo -n true` fails again (`rc=1`). The lex path
+  now fires exactly when sudo is needed: `_sudo_gate` → `_tty_preview` →
+  “sudo password now:” → `sudo -v < /dev/tty` (password goes straight to
+  sudo, never through lex). Without a controlling TTY: unchanged clean
+  refusal.
+- **user-space Postgres startable again**: apt removed `libxml2 2.9.14` and
+  `libicu74` on Oct 5; the Noble debs `libxml2_2.9.14+dfsg-1.3ubuntu3.9` and
+  `libicu74_74.2-1ubuntu3.1` now live under `~/.lex/pg/deb` (`dpkg-deb -x`) —
+  `ai.sh pg start` + `psql` query green again.
+- **tests no longer depend on the machine's sudoers**: `test_features`
+  (DE+EN) simulates the sudo-ticket state (`_sudo_ticket_valid` stub: block
+  “without ticket” → `1`, block “session grant” → `0`). Before, the NOPASSWD
+  revert silently changed which branch ran.
+- **tests +3 → 794** (`test_features` 525 → 528; 807 PASS lines minus 13
+  runner marks), `run_all.sh` **13/13** in DE and EN, sequential; `bash -n` +
+  shellcheck warning-clean. `ai.sh` (outside the repo) gained `pg` and
+  `docker` subcommands incl. `start`/`stop` integration.
+
 ### Fixed 2026-10-06 — fix package steps 53–56 (tool hang, HTTP 500, redaction, fail memory)
 
 - **Tool runs no longer hang on the pipe**: `_run_limited` now writes
