@@ -28,7 +28,7 @@ set -o pipefail
 # ---------------------------------------------------------------------------
 # Version & paths
 # ---------------------------------------------------------------------------
-readonly LEX_VERSION="${LEX_VERSION:-0.2.0}"
+readonly LEX_VERSION="${LEX_VERSION:-0.2.1}"
 readonly LEX_NAME="lex"
 
 # Minimum version (§8 D, decision 2026-10-07): Bash >= 4. `coproc`
@@ -4262,22 +4262,16 @@ agent_loop() {
     if [[ -t 0 ]]; then
       # -p = prompt as readline argument (offset see note before while).
       # Raw colour escapes, NO \[..\] masks — bash masks them itself.
-      if [[ -n "${_lurk_active:-}" ]]; then
-        # Lurk mode (plan 2026-10-08): read with timeout instead of
-        # blocking — after LEX_LURK_INTERVAL (default 20s) the watcher
-        # tick runs. rc>128 without _int_seen = -t timeout (^C sets
-        # _int_seen in the handler and needs the ^C branch below, not
-        # the tick).
-        IFS= read -t "${LEX_LURK_INTERVAL:-20}" -e -p "$(_prompt)" input
-        rc=$?
-        if (( rc > 128 )) && [[ -z "${_int_seen:-}" ]]; then
-          _lurk_tick
-          continue
-        fi
-      else
-        IFS= read -e -p "$(_prompt)" input
-        rc=$?
-      fi
+      # Lurk mode (fix 2026-10-08, user report "jumps back while typing and
+      # overwrites every few seconds"): the watcher tick does NOT run as
+      # read -t in the input loop any more — the timeout discarded the keys
+      # typed so far (repro: "abc" → tick → only "def" arrived, tmux).
+      # Instead a background ticker (_lurk_ticker_start) feeding a pending
+      # file; alerts are printed BEFORE the next prompt
+      # (_lurk_pending_flush) — the input stays intact.
+      [[ -n "${_lurk_active:-}" ]] && _lurk_pending_flush
+      IFS= read -e -p "$(_prompt)" input
+      rc=$?
     else
       IFS= read -r input
       rc=$?
@@ -4288,6 +4282,7 @@ agent_loop() {
         printf '\n'
         continue
       fi
+      _lurk_ticker_stop
       return 0
     fi
     # prompt guarantee (finding 2026-10-03, user report "after tasks only a
@@ -4329,6 +4324,7 @@ agent_loop() {
     # `read -p` prompt, so it cannot eat it anymore.
     _spin_stop
   done
+  _lurk_ticker_stop
   echo
   echo "Bye! 👋"
 }
@@ -4567,6 +4563,7 @@ LEXPEN_EOF
       if [[ -n "${_lurk_active:-}" ]]; then
         _lurk_active=""
         _lurk_open=0
+        _lurk_ticker_stop
         echo "  Note: /lexlurk is now off (slot 0 belongs to /lexpen)."
       fi
       ;;
@@ -4593,7 +4590,9 @@ LEXPEN_EOF
 #   /lexlurk alerts [n]  last n alerts, resets the lexl!N marker
 #   /lexlurk check       trigger the watcher check now (rc1 = alert)
 #   Effects: prompts/lexlurk.md (created on demand) + prompt marker "l" +
-#   watcher tick in read -t (tools/lurk_watch.sh, LEX_LURK_INTERVAL=20s).
+#   background ticker (_lurk_ticker_start/_lurk_tick, tools/lurk_watch.sh,
+#   LEX_LURK_INTERVAL=20s) — no read -t in the input loop (would discard
+#   typed keys).
 # ---------------------------------------------------------------------------
 
 _lex_watch_path() { # path to lurk_watch.sh (next to the lex script or PATH)
@@ -4674,6 +4673,9 @@ LURK_EOF
         echo "⚠ watcher baseline not created — /lexlurk check shows why." >&2
       fi
       _swap_slot0 lurk || return 0
+      # Ticker only at a real terminal (REPL) — tests/oneshot start no
+      # background process; stop via _lurk_ticker_stop on off/displacement.
+      [[ -t 0 ]] && _lurk_ticker_start
       echo "✓ Lurk mode active — watcher prompt, tick every ${LEX_LURK_INTERVAL:-20}s."
       echo "  Marker: lexl> (open alerts: lexl!N>) · /lexlurk alerts · /lexlurk status"
       echo "  back: /lexlurk off · /lex = original · /lexpen = engineer persona"
@@ -4686,6 +4688,7 @@ LURK_EOF
       _system_prompt="$_system_prompt_default"
       _lurk_active=""
       _lurk_open=0
+      _lurk_ticker_stop
       _lurk_watch --stop >/dev/null 2>&1 || true
       _swap_slot0 default || return 0
       echo "✓ Lurk mode off — original prompt active again (baseline/alerts remain)."
@@ -4711,23 +4714,75 @@ LURK_EOF
   return 0
 }
 
-# One watcher tick (read -t timeout in lurk mode): quiet rc0/rc2, at rc1
-# alert: output at the prompt, bell, desktop notification, counter for lexl!N.
+# One watcher tick (background ticker in lurk mode): quiet rc0/rc2, at rc1
+# alert: pending file instead of stdout, bell, desktop notification.
+# _lurk_open grows only in the flush (REPL) — the tick itself must stay
+# silent (it runs while the user is typing).
 _lurk_tick() {
-  local out rc n
+  local out rc n f add
   out="$(_lurk_watch --check 2>/dev/null)"
   rc=$?
   (( rc == 1 )) || return 0
   n="$(printf '%s\n' "$out" | grep -c '^ALERT' || true)"
   n="${n:-0}"
-  _lurk_open=$(( ${_lurk_open:-0} + n ))
-  printf '\n⚠ LURK — %s new alert(s):\n%s\n' "$n" "$out"
-  printf '\a' > /dev/tty 2>/dev/null || true
+  (( n > 0 )) || return 0
+  # pending file instead of stdout: the tick runs in the BACKGROUND — any
+  # line on stdout mid-typing would destroy the input line (user report
+  # 2026-10-08 "jumps back while typing, overwrites every few seconds").
+  f="${_lex_home}/lurk/pending"
+  mkdir -p "${_lex_home}/lurk" 2>/dev/null || return 0
+  add="$(cat "$f" 2>/dev/null || echo 0)"
+  [[ "$add" =~ ^[0-9]+$ ]] || add=0
+  printf '%s\n' "$(( add + n ))" > "$f"
+  # Bell via /dev/tty: control char without cursor movement — beeps,
+  # leaves the input line alone. Subshell: without a TTY (tests) the
+  # redirection error stays silent (flat form had it on stderr).
+  ( printf '\a' > /dev/tty ) 2>/dev/null || true
   if [[ -z "${LEX_LURK_NO_NOTIFY:-}" ]] && command -v notify-send >/dev/null 2>&1; then
     notify-send -u critical -t 8000 "lex lurk" \
       "$(printf '%s' "$out" | head -n3)" 2>/dev/null || true
   fi
   log "lurk: $n new alerts"
+}
+
+# Print pending alerts at the prompt (stands BEFORE read -p so message and
+# marker lexl!N> precede the new prompt): read pending, bump _lurk_open,
+# remove the file.
+_lurk_pending_flush() {
+  local f="${_lex_home}/lurk/pending" n
+  [[ -f "$f" ]] || return 0
+  n="$(cat "$f" 2>/dev/null || echo 0)"
+  rm -f "$f"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 0
+  (( n > 0 )) || return 0
+  _lurk_open=$(( ${_lurk_open:-0} + n ))
+  printf '⚠ LURK — %s new alert(s)\n' "$n"
+}
+
+# Background ticker: a subshell calling _lurk_tick every LEX_LURK_INTERVAL
+# (default 20s). Once the REPL is gone (kill -0 $$) it exits on its own —
+# no orphan process. Stop via _lurk_ticker_stop (kill + pkill -P for the
+# running sleep).
+_lurk_ticker_start() {
+  _lurk_ticker_stop
+  (
+    trap 'exit 0' TERM INT HUP
+    while :; do
+      sleep "${LEX_LURK_INTERVAL:-20}" || exit 0
+      kill -0 "$$" 2>/dev/null || exit 0
+      _lurk_tick
+    done
+  ) &
+  _lurk_ticker_pid=$!
+}
+
+_lurk_ticker_stop() {
+  [[ -n "${_lurk_ticker_pid:-}" ]] || return 0
+  kill "$_lurk_ticker_pid" 2>/dev/null || true
+  pkill -P "$_lurk_ticker_pid" 2>/dev/null || true
+  wait "$_lurk_ticker_pid" 2>/dev/null || true
+  _lurk_ticker_pid=""
+  return 0
 }
 
 # ---------------------------------------------------------------------------

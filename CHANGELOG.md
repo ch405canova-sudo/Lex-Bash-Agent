@@ -4,6 +4,31 @@ All notable changes to lex.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
+## [0.2.1] — 2026-10-08
+
+### Fixed 2026-10-08 — `/lexlurk` input fix (no more `read -t` in the REPL loop)
+
+- **Typed input survives the watchdog tick:** `read -t
+  ${LEX_LURK_INTERVAL:-20}` in the middle of the input discarded the keys
+  typed so far on every tick (repro in tmux: `abc` → tick → only `def`
+  arrived), and `_lurk_tick` printed `⚠ LURK` lines straight into the
+  input line (user report “input goes crazy, jumps back, overwrites
+  typing every few seconds”).
+- **Background ticker:** `_lurk_ticker_start()` as a subshell (every
+  `LEX_LURK_INTERVAL` → `_lurk_tick`; `kill -0 $$` prevents orphan
+  processes), started only at a TTY in `cmd_lexlurk on`, stopped on
+  `off` / `cmd_lexpen` displacement / REPL end (`_lurk_ticker_stop` =
+  kill + `pkill -P` for the running `sleep` + wait).
+- **pending instead of stdout:** `_lurk_tick` writes the rolling file
+  `${_lex_home}/lurk/pending`; `_lurk_pending_flush` reports
+  `⚠ LURK — n new alert(s)` before the next prompt and bumps
+  `_lurk_open` (marker `lexl!N>` unchanged); bell via
+  `( printf '\a' > /dev/tty ) 2>/dev/null` in the subshell (silent
+  without a TTY; flat form had bash report the redirection error).
+- Tests +9 → `test_features` 621; `run_all` 13/13 = 912 [PASS] = 899
+  checks; lint clean; `lex` 4914 → 4969 lines; E2E tmux (2-s): input
+  `lexl> abcdef` survives two tick fires ✓.
+
 ## [0.2.0] — 2026-10-08
 
 ### Added 2026-10-08 — Prompt mode `/lexlurk` (lurk watch) + `/help` overview

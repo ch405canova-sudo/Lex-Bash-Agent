@@ -1,6 +1,6 @@
 # lex
 
-A pure-Bash LLM terminal agent (v0.2.0) for a **local** llama-server.
+A pure-Bash LLM terminal agent (v0.2.1) for a **local** llama-server.
 Core dependencies: `bash`, `jq`, `curl` — optionally `node` for the MCP
 tools and `python3` for two test fixtures. No Docker, no Python runtime,
 no compiled helper.
@@ -463,7 +463,7 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 4914 lines, 17 tools
+lex              the agent — one file, 4969 lines, 17 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)

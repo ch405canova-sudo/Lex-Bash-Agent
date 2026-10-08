@@ -469,7 +469,7 @@ assert "write_file (new file 644 with umask 022)" "644" "$mode"
 # /status
 # ---------------------------------------------------------------------------
 out="$(printf '/status' | LEX_MOCK="done" "$LEX_BIN" --oneshot 2>/dev/null)"
-contains "/status (Version)" "lex 0.2.0" "$out"
+contains "/status (Version)" "lex 0.2.1" "$out"
 contains "/status (mode)" "mode" "$out"
 contains "/status (mode=mock)" ": mock" "$out"
 contains "/status (mem path)" "$LEX_MEM_DIR" "$out"
@@ -1761,15 +1761,63 @@ out="$(LEX_LURK_DIR="$FX/leer" "$WATCH" --status 2>&1)"
 contains "lurk-watch (status without baseline)" "no baseline" "$out"
 unset LEX_LURK_DIR LEX_LURK_FAIL2BAN_LOG LEX_LURK_AUTH_LOG
 
-# Static anchors: tick loop, desktop gate, timeout read
+# Static anchors: background ticker, desktop gate — and REGRESSION against
+# the old read -t in the input loop (user report 2026-10-08 "jumps back
+# while typing and overwrites every few seconds": the timeout discarded the
+# keys typed so far, repro tmux "abc" → tick → only "def" arrived).
 grep -q 'read -t "${LEX_LURK_INTERVAL:-20}" -e' "$LEX_BIN"; rc=$?
-check "lurk (read -t with interval in loop)" "$(( rc == 0 ? 1 : 0 ))"
+check "lurk (no read -t in input loop)" "$(( rc != 0 ? 1 : 0 ))"
+grep -q '_lurk_ticker_start' "$LEX_BIN"; rc=$?
+check "lurk (background ticker wired in)" "$(( rc == 0 ? 1 : 0 ))"
+grep -q '_lurk_pending_flush' "$LEX_BIN"; rc=$?
+check "lurk (pending flush at prompt)" "$(( rc == 0 ? 1 : 0 ))"
 grep -q '_lurk_tick' "$LEX_BIN"; rc=$?
 check "lurk (_lurk_tick wired in)" "$(( rc == 0 ? 1 : 0 ))"
 grep -q 'LEX_LURK_NO_NOTIFY' "$LEX_BIN"; rc=$?
 check "lurk (notify gate present)" "$(( rc == 0 ? 1 : 0 ))"
 grep -q 'notify-send' "$LEX_BIN"; rc=$?
 check "lurk (notify-send used)" "$(( rc == 0 ? 1 : 0 ))"
+
+# Functional pending flush: message BEFORE the prompt, _lurk_open bumped,
+# file consumed — replaces the old tick output.
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+  source "$2" "" </dev/null >/dev/null 2>&1
+  _lurk_active=1; _lurk_open=0
+  mkdir -p "$LEX_HOME/lurk"; printf 3 > "$LEX_HOME/lurk/pending"
+  _lurk_pending_flush > "$LEX_HOME/pending.out"   # NOT in $() — else the variable effect is lost
+  o="$(cat "$LEX_HOME/pending.out")"; left=$([[ -f $LEX_HOME/lurk/pending ]] && echo 1 || echo 0)
+  printf "open=%s|left=%s|out=%s" "${_lurk_open:-}" "$left" "$o"' \
+  _ "$TMP" "$LEX_BIN" 2>&1)"
+contains "lurk-flush (open alerts counted)" "open=3|" "$out"
+contains "lurk-flush (pending consumed)" "left=0|" "$out"
+contains "lurk-flush (message at prompt)" "⚠ LURK — 3 new alert(s)" "$out"
+
+# Functional _lurk_tick: pending file instead of stdout (the tick runs in
+# the background — stdout lines would destroy the input line).
+export LEX_LURK_FAIL2BAN_LOG="$TMP/lurk_tick_fb.log" LEX_LURK_AUTH_LOG="$TMP/lurk_tick_au.log"
+rm -rf "$LEX_HOME/lurk"; mkdir -p "$LEX_HOME/lurk"
+printf 'ok\n' > "$LEX_LURK_AUTH_LOG"
+printf '[j] Ban 1.1.1.1\n' > "$LEX_LURK_FAIL2BAN_LOG"   # baseline needs BOTH logs
+LEX_LURK_DIR="$LEX_HOME/lurk" "$WATCH" --start >/dev/null 2>&1
+printf '[j] Ban 9.9.9.9\n' >> "$LEX_LURK_FAIL2BAN_LOG"   # after: delta -> rc1
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+  source "$2" "" </dev/null >/dev/null 2>&1
+  o="$(_lurk_tick 2>&1)"; p=$([[ -f $LEX_HOME/lurk/pending ]] && cat $LEX_HOME/lurk/pending || echo none)
+  printf "out=[%s]|pending=%s" "$o" "$p"' _ "$TMP" "$LEX_BIN" 2>&1)"
+contains "lurk-tick (no stdout)" "out=[]" "$out"
+contains "lurk-tick (pending=1)" "pending=1" "$out"
+unset LEX_LURK_FAIL2BAN_LOG LEX_LURK_AUTH_LOG
+
+# Functional ticker: start → PID alive, stop → PID dead (no orphan process)
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+  source "$2" "" </dev/null >/dev/null 2>&1
+  _lurk_ticker_start; p="${_lurk_ticker_pid:-}"
+  alive=$(kill -0 "$p" 2>/dev/null && echo 1 || echo 0)
+  _lurk_ticker_stop; after=$(kill -0 "$p" 2>/dev/null && echo 1 || echo 0)
+  printf "pid=%s|alive=%s|after=%s" "$([[ -n $p ]] && echo set || echo unset)" "$alive" "$after"' \
+  _ "$TMP" "$LEX_BIN" 2>&1)"
+contains "lurk-ticker (started)" "pid=set|alive=1|" "$out"
+contains "lurk-ticker (stopped)" "after=0" "$out"
 
 # ---------------------------------------------------------------------------
 # Step 51 — hard session permissions (umask-proof: sessions/ 700, dir 700,

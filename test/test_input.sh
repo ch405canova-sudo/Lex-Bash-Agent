@@ -32,7 +32,7 @@ assert() {
 export LEX_HOME="$TMP"
 
 # 1. --version
-assert "version" "lex 0.2.0" "$("$LEX_BIN" --version)"
+assert "version" "lex 0.2.1" "$("$LEX_BIN" --version)"
 
 # 2. --help
 out="$("$LEX_BIN" --help 2>&1)"
