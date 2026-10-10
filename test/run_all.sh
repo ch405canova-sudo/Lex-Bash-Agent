@@ -35,7 +35,7 @@ printf 'lex tests\n'
 # executable · no test file deleted compared to HEAD · every existing
 # test_*.sh really does run.
 testboden_check() {
-  local ref b f missing="" deleted="" orphan=""
+  local ref b f bad missing="" deleted="" orphan=""
   # Only the runner invocations themselves are matched (paths carrying the
   # SCRIPT_DIR prefix) — comments and example names inside this script must
   # not trip the check.
@@ -51,6 +51,16 @@ testboden_check() {
   if git -C "$LEX_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     deleted="$(git -C "$LEX_DIR" diff --name-only --diff-filter=D HEAD -- test/ 2>/dev/null | tr '\n' ' ')"
   fi
+  # N9 self-test: the syntax check must not wave through a deliberately
+  # broken file (otherwise the wider scope is only a claim).
+  bad="$(mktemp)"
+  printf 'if true\n' >"$bad"
+  if syntax_check "$bad" 2>/dev/null; then
+    rm -f "$bad"
+    printf '  syntax_check does not catch a broken file (N9)\n'
+    return 1
+  fi
+  rm -f "$bad"
   if [[ -n "$missing$deleted$orphan" ]]; then
     [[ -n "$missing"  ]] && printf '  missing/not executable:%s\n' "$missing"
     [[ -n "$deleted"  ]] && printf '  deleted compared to HEAD:%s\n' "$deleted"
@@ -60,8 +70,25 @@ testboden_check() {
   return 0
 }
 
+# Syntax check as wide as CLAUDE.md/CI demand (finding N9 2026-10-08:
+# before only `lex` + `llama-proxy.sh` — `lurk_watch.sh`, `werkstatt_index.sh`
+# and the test files themselves were never syntax-checked locally). Arguments
+# overwrite the file list (self-test in the testboden).
+syntax_check() {
+  local f rc=0
+  if (( $# > 0 )); then
+    for f in "$@"; do bash -n "$f" || rc=1; done
+    return "$rc"
+  fi
+  bash -n "$LEX_BIN" || rc=1
+  for f in "$LEX_DIR"/tools/*.sh "$SCRIPT_DIR"/*.sh; do
+    [[ -e "$f" ]] || continue
+    bash -n "$f" || rc=1
+  done
+  return "$rc"
+}
+
 run_test "testboden"   testboden_check
-syntax_check() { bash -n "$LEX_BIN" && bash -n "$LEX_DIR/tools/llama-proxy.sh"; }
 run_test "syntax"        syntax_check
 run_test "input"        "$SCRIPT_DIR/test_input.sh"
 run_test "tools"        "$SCRIPT_DIR/test_tools.sh"

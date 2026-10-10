@@ -191,6 +191,11 @@ assert "loop-guard (soft stage: turn continues)" "0" "$rc"
 assert "loop-guard (final answer arrives)" "Done." "$out"
 assert "loop-guard (nudge on stderr)" "1" "$([[ "$err" == *"Fail memory"* ]] && echo 1 || echo 0)"
 assert "loop-guard (wording three times identical)" "1" "$([[ "$err" == *"three times identically"* ]] && echo 1 || echo 0)"
+# N2 (audit 2026-10-08): the reset ran before log/session record → every
+# nudge record contained "run":0 instead of the actual hit count.
+assert "N2 (loop_guard nudge record names the counter)" "3" \
+  "$(jq -r 'select(.type=="loop_guard" and .action=="nudge") | .run' \
+    "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
 
 # hard: six identical batches → after the soft stage abort with rc 1
 same t1 > "$mock"; same t2 >> "$mock"; same t3 >> "$mock"

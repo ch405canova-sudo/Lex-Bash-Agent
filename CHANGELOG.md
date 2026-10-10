@@ -4,6 +4,233 @@ All notable changes to lex.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
+## [0.3.0] — 2026-10-09
+
+### Added 2026-10-09 — Pentest round:3 skills +2 hooks + own MCP server (prompt left untouched)
+
+- **Warranty**: `git status --porcelain lex` =0, `git diff lex` empty since
+  `bc54623` — the system instruction (including §5c "just reach for it") was
+  not touched; everything is ADDITIVE in `~/.lex/` + one new `tools/` script.
+- **(a) Three skills** in `~/.lex/skills/` (injected live, `_skills_ex` =4450
+  characters, `--status` = `skills :3`): `pentest-pipeline` (mandatory scope
+  with the real scopes SQL → Recon → Enum → Vuln → landing), `scan-flags`
+  (nmap/naabu/ffuf/nuclei shorthand + pace rule max `-T3` for the shared
+  network), `findings-to-db` (recipe against `findings`/`intel`/`reports`,
+  columns queried live beforehand via `psql \d`).
+- **(b) Two hooks**: `pre_tool/10-dos-gate` blocks with rc≠0 at `-T5`,
+  `--(min|max)-rate ≥5000`, `hydra`, `sqlmap --risk3/4` (live: every danger
+  rc=1 with the correct `_hook_msg`, `-T3` rc=0 — no pentest block, only
+  pace/security levels) and `post_tool/30-audit-log` (bash+rc →
+  `~/.lex/lurk/audit.log`); `--status` = `hooks :1 pre,2 post`.
+- **(c) `tools/pentest_mcp.sh`** (stdio JSON-RPC, ~250 lines, NO lex code):
+  `nmap(target,ports?)` with a fixed throttle `-Pn -n -T3 --open` + output
+  compression, `nuclei(target,severity?)` (`-duc`), `recon(domain)` with
+  subfinder ∥ amass internally in parallel → httpx; class validation, no
+  eval, timeouts. Environment findings live: without `-n` nmap hung for30 s
+  (mdns chain in nsswitch), every `-sV` variant hangs permanently →
+  deliberately left out. Raw tests: `127.0.0.1` → `22/tcp open ssh ·5432
+  open postgresql ·8080 open http-proxy`, injection input (`; rm -rf /`)
+  rejected.
+- **(d) Wiring**: `~/.lex/mcp.json` new (pentest +5 defaults, argv
+  byte-identical to the cache), `_mcp_discover_all` → **6 servers,51
+  tools** → schema **70 =19 +51**; **live chain proof** (real model,65 s,
+  turn2/4): the model called `mcp__pentest__nmap` NATIVELY, answer "22,
+ 5432,8080" correct.
+- **VERIFY**: `bash -n` + `shellcheck -S warning` rc0 · `./test/run_all.sh`
+  rc0 **13/13 =1174** · log2585 lines · no orphan processes.
+
+### Removed 2026-10-09 — Security levels completely disabled
+
+- **(a) `~/.lex/hooks/pre_tool/10-dos-gate` removed** — the only blocking
+  gate of the installation (`-T5`, `--(min|max)-rate ≥5000`, `hydra`,
+  `sqlmap --risk3/4`) → `--status` = `hooks :0 pre,2 post`. The two post
+  hooks (`30-audit-log`, `50-werkstatt-index`) stay — they only observe,
+  they block nothing.
+- **(b) Skill `scan-flags`**: the pace rule ("at most `-T3`, never `-T5`,
+  no high rates — blocked by the dos-gate") along with the dos-gate
+  reference and the bracket rules `(rate ≤1000)`/`(low threads)` are gone;
+  the example commands stay.
+- **(c) `tools/pentest_mcp.sh`**: the fixed `-T3` throttle in the nmap
+  wrapper deleted (speed = nmap default, no forced level), nuclei default
+  now `info,low,medium,high,critical` instead of `medium,high,critical`
+  (nothing pre-filtered), tool descriptions and comments without level
+  pressure and dos-gate reference.
+- **VERIFY**: `bash -n` + `shellcheck -S warning` rc0 (pre_tool directory
+  empty) · MCP raw test `nmap(127.0.0.1,22,5432)` without `-T3` → `22/tcp
+  open ssh ·5432/tcp open postgresql` · `./test/run_all.sh` rc0 **13/13
+  green** · `--status` = `0 pre,2 post`, `skills :3`, `mcp-cache :51`.
+
+### Fixed2026-10-09 — Path truth: the system prompt did not name the project root
+
+- The system prompt now says "Your project lies EXCLUSIVELY in
+  <repo directory>" (dynamic from the script path, `lex:638`, applies in
+  both prompt modes); `CLAUDE.md` gets the rule "path truth (without
+  exception)" — `~/Ai/Repo-Lex` is exclusively the GitHub push copy (EN
+  port) with no operational meaning, `~/Ai/wiki` only memory/log.
+  LEX.md §5 repo table updated to1174/1161. The cause was the path
+  hysteria in the live chat test2026-10-09 (the model searched under
+  `/home/<user>/Ai/`). Also: MCP discovery cache for the real servers
+  built —5 servers,48 tools in `~/.lex/mcp.cache.json`, schema19+48=67.
+
+### Fixed2026-10-09 — `lurk_watch.sh`: wrong line in the ban/auth/login alerts
+
+- All three `do_check` rules reported `tail -n1` of the raw log: the
+  fail2ban alert grabbed a "Found X" (filter) line instead of the ban
+  (actions) line → wrong IP; the auth alert often grabbed "Connection
+  closed by invalid user" (not a failure line); the login alert almost
+  never an `Accepted` entry. Now: last matching line via
+  `grep ' Ban '` / `Failed password|authentication failure` /
+  `Accepted (password|publickey|…)` with `tail -n1`, falling back to the
+  previous `tail -n1` if no match. Counter/delta logic unchanged, alert
+  text format unchanged.
+
+### Added2026-10-08 — Power round (six building blocks, each verified individually)
+
+- **Hooks**: `hooks/pre_tool/` and `hooks/post_tool/` (executable files);
+  `pre_tool` with rc !=0 blocks the tool call fail-closed (also on
+  timeout), `post_tool` observes `LEX_HOOK_EVENT/TOOL/ARGS/RC` and stays
+  invisible on the result. Gates: `LEX_HOOKS=off`, `LEX_HOOK_TIMEOUT` (5 s).
+- **Sub-agents**: `agent(task, mode ∈ explore|plan|review|summarize)` —
+  own, fresh context, depth gate (no sub-sub-agent), turn limit
+  `LEX_AGENT_MAX_TURNS`, the result is plain text output.
+- **Parallel tool calls**: consecutive stateless tools (`read_file`,
+  `list_files`, `search`, `mem_list`, `mem_search`) run in background
+  subshells, collected in original order — MCP, `agent`, `bash` and
+  writing tools stay serial. Gate `LEX_PARALLEL=off`. Measurement (3 calls
+  +0.5-s hook):1.4 s instead of3.5 s.
+- **MCP-native**: discovery cache `~/.lex/mcp.cache.json` with the
+  `inputSchema` of the servers; from it own schema entries
+  `mcp__Server__Tool`, directly callable. `mcp(server, "__refresh")`
+  rebuilds the cache for all servers, changed argv in `mcp.json`
+  invalidates the entries automatically, `LEX_MCP=0` switches them off.
+- **Skills**: `~/.lex/skills/<name>/SKILL.md` (frontmatter `name`/
+  `description` + body) is automatically injected into the system prompt —
+  also on prompt mode switch (`/lexpen`, `/lexlurk`). Gates
+  `LEX_SKILLS=off`, `LEX_SKILL_MAX` (6000 characters per file),
+  `LEX_SKILL_TOTAL` (40000 characters in total).
+- **Background tasks**:19th tool `task(action, command?, id?, name?,
+  tail?)` with `start|list|status|result|kill` — commands keep running
+  detached in their own session, output and exit code lie under
+  `~/.lex/tasks/<id>/` and stay readable after lex exits. Same deny/sudo/
+  approve hurdles as `bash`, `LEX_TASK_MAX` (5 simultaneous),
+  `LEX_TASK_TIMEOUT` (→ rc124), `--status` names the task line.
+- Tool counter **17 →19** (prompt, schema, tests, README, CLAUDE).
+- `run_all`1031 → **1174 [PASS] =1161 individual**, `lex`5145 → **5995
+  lines**.
+
+### Fixed2026-10-08 — `exec2>/dev/null` silenced the stderr of the whole shell
+
+- `_lurk_pending_lock`/`_lurk_pending_unlock` used `exec {fd}>…2>/dev/null`;
+  `exec` without a command redirects to the **whole shell** — after the
+  first lock/unlock fd2 was permanently on `/dev/null`. In the test path
+  every `[FAIL]` message disappeared from `test_features:406` onwards —
+  that is the cause of the silent rc=1 runners from2026-10-08. Fix:
+  redirect into a group `{ exec {fd}>…; }2>/dev/null` — applies only
+  during that, the fd stays open. Details: `LEX.md` §6 #41 and
+  `wiki/errors/2026-10-08-exec-2-dev-null-totete-shell-stderr.md`.
+
+### Fixed2026-10-08 — Remaining audit test gaps §6 (§7/80)
+
+- **browser `back`/`tabs`/`close`**: the mapping to `browser_navigate_back`/
+  `browser_tabs`/`browser_close` and the index validation were never
+  checked; `test/fake_mcp.sh` did not know the three MCP tools → extended
+  (list/select); **+6** `test_features`.
+- **fake_mcp JSON-RPC contract**: `notifications/cancelled` without id → no
+  answer, unknown method → `-32601`, server still reachable afterwards —
+  previously only inside `fake_mcp.sh` itself; **+3** via pipe.
+- **`_tools_off` body** (`test_compaction`): previously only a source
+  anchor — now functional (summary request `[]`, normal request with
+  tools); **+2**.
+- **`do_status` positive output** (`lurk_watch`): `run active (marker
+  .running)` after `--start`; **+1** — previously only the negative case.
+- Audit §6 thus **13/13 done**.
+- **O2** (`lex`): truncation at the character boundary (`_hint_args`, tool
+  errors, trace) — `%.Ns` truncated bytes and could end mid multi-byte
+  character; now `${v:0:N}`; **+1** `test_features`.
+- **O3** (`lex`): mock consumption (`head`+`tail`+`mv`) now under
+  `_lurk_pending_lock` — parallel runs of the same `LEX_MOCK_FILE` read
+  the same answer before and wrote into the same `.tmp`; **+1**
+  (deterministic).
+- `run_all`13/13 = **1031 [PASS] =1018 individual** (1017→1031); lint
+  clean; `lex`5134 → **5145 lines**.
+
+### Fixed2026-10-08 — Audit test-gap round (§6, #79)
+
+- `test_features` R4/R5/R6 (lurk_watch): `*_SNAP` fixtures now also on
+  `--start` — before, the baseline was the real machine state (ss/ip/key
+  files), R4/R5 fired only by chance, R6 also without change rc1; every
+  fixture is reset after its check (`LEX_LURK_NO_SNAP=1` does not advance
+  the baseline). Needles corrected literal (`new since baseline:10.0.0.5
+  wlan0`, `0.0.0.0:4444`, `prompt    : standard` instead of grep syntax
+  `\|`).
+- `test_http` fake_server "port in use": second run before killing the
+  foreign listener (before the port was free → no message + a second,
+  never cleaned-up listener), needle literal (`in use`).
+- `test_proxy`: `contains`/`assert` were missing completely → "command
+  not found" left `FAIL` untouched, the runner went **silently green** and
+  the M7 checks never ran; helpers added, inverted rc0 assert corrected,
+  port-in-use test with foreign listener (own proxy is caught by
+  `_running` before the ss check), `LEX_PROXY_DIR` to `$TMP`, ports
+ 24618/24619 added to the freedom list.
+- Only `test/` changed, `lex` unchanged (5134 lines).
+- `run_all`13/13 = **1017 [PASS] =1004 individual** (1003→1017); lint
+  clean.
+
+### Fixed2026-10-08 — Audit medium/low (M1–M13, N1/N2/N5/N7–N15; N3/N4/N6 skipped)
+
+- **M1** `_tool_spill`: umask077 + chmod600 + `_redact`, directory chmod
+ 700; +3 `test_limits`
+- **M2** `session_init` idempotent (+2 `test_features`); **M3**
+  `_load_settings` `max_nudges`/`silent_turns` + JSON warning (+3)
+- **M4** `--eval`+`load_config`/`log_dir`/rc1; **M5** `/server` from
+  `_api_url`+rc1, argparse `--approve`
+- **M6** `_kill_tree` (BFS TERM→KILL) + **M7** `_port_owned_by`/PORT
+  validation/bind proof; +11 `test_proxy`
+- **M8** `_snap_write` (mktemp in `$DIR`, `mv -f`, chmod600) + **M9**
+  `alert()` via `jq -cn --arg`; +8 `test_features`
+- **M10** RUN marker only if present; +4; **M13** werkstatt_index arg
+  validation rc2 + mktemp in `$HT`; +5
+- **N1** pending counter flock-protected (`_lurk_pending_lock/add/drain`,
+  fd in the CURRENT process); +2 `test_features`; **N2** `_loop_run` reset
+  after record (+1); **N5** `_lurk_interval` (+4); **N8** `_float_or`
+  regex (+7); **N9** `run_all.sh` syntax_check broad + testboden self-test
+- **N10–N15** doc sync LEX.md (blank line, date, next-step, lever, sort+gap,
+  format, "no commit back then"×13, commit state, #77→679eb45)
+- `run_all`13/13 = **1003 [PASS] =990 individual** (941→1003); lint clean;
+  `lex`5001 → **5134 lines**; §5 line map regenerated; README/CLAUDE/
+  folder in sync
+
+Report: `AUDIT-2026-10-08.md` (0 critical,6 high,13 medium,15 low,17
+observations). Every fix built individually and then fully tested.
+
+### Fixed2026-10-08 — Audit high (H1–H6)
+
+- **`_redact()` missed URL credentials and `user:`/`login:` pairs**
+  (audit H1): prefilter with `case "${out,,}"` (`*pass*`, `*secret*`,
+  `*token*`, `*key*`, `*auth*`, `*bearer*`, `*://*@*`, `*sk-*`, `*xox*`,
+  `*user:*`, `*login*`), redaction in three sed stages (double, simple,
+  unquoted) plus `user:`/`login:` rule; the quotes stay intact → the
+  session JSON stays valid. Tests +10 → `test_features`.
+- **`write_file`/`append_file` accepted empty paths and directories**
+  (H2): now rc1 with `Error: empty path.` resp. `Error: '<path>' is a
+  directory.` Tests +7 → `test_tools`.
+- **`lurk_watch.sh` peer rule checked the port column instead of the IP**
+  (H3): `snap_peers` `$4` → `$5` — external peers were never alerted
+  before. Tests +4 → `test_features`.
+- **`lurk_watch.sh` now counts successful logins** (H4): `login_count()`
+  (`Accepted …`), counts line `fb=/au=/login=`, new rule R2b `alert high
+  login`; an existing baseline without `login=` skips the rule. Tests +5 →
+  `test_features`.
+- **`llama-proxy.sh` `stop` could kill foreign processes** (H5):
+  `_is_our_proxy()` checks `/proc/$pid/cmdline` (fallback `ps -o args=`)
+  for `ncat` + `--listen`; foreign PID → error rc1 without kill, orphaned
+  PID file → rc0 + cleanup. Tests +3 → `test_proxy`.
+- **Doc numbers** (H6): README + LEX.md to the actual state (5001 lines,
+ 11 test files,928 checks, default `LEX_REASONING_MAX=0` /
+  `LEX_TRACE_RESULT_MAX=0`), §5 line map regenerated.
+- `run_all`13/13 = **941 [PASS] =928 individual**; lint clean; `lex`
+ 4966 → **5001 lines**. No commit (order open).
+
 ## [0.2.1] — 2026-10-08
 
 ### Fixed 2026-10-08 — `/lexlurk` input fix (no more `read -t` in the REPL loop)
@@ -545,7 +772,7 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
 ### Changed/Fixed 2026-10-06 — sudo password back, Postgres libs, deterministic counts
 
 - **sudo password visible again (user order “undo it”)**: the machine-wide
-  `/etc/sudoers.d/90-chaos` (`chaos ALL=(ALL) NOPASSWD:ALL`) created on
+  `/etc/sudoers.d/90-lex` (`user ALL=(ALL) NOPASSWD:ALL`) created on
   2026-10-03 was removed — `sudo -n true` fails again (`rc=1`). The lex path
   now fires exactly when sudo is needed: `_sudo_gate` → `_tty_preview` →
   “sudo password now:” → `sudo -v < /dev/tty` (password goes straight to

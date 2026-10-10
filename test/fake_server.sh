@@ -31,6 +31,12 @@
 #     A caller picks up the PID via command substitution
 #     (`PID="$(fake_server.sh …)"`) — which only returns once
 #     STDOUT is closed. A `wait` here would hang the caller.
+#   - The port wait is a BIND PROOF, not an `nc -z` (audit finding M11,
+#     2026-10-08): `nc -z` also hits a FOREIGN listener when our
+#     `ncat --listen` could not bind (port taken) — the tester then talked
+#     to the wrong server and the test went green although nothing ran
+#     here at all. Success therefore means: OUR PID listens on the port
+#     (ss), and the PID lives (no zombie).
 #   - Handler and lock sit NEXT TO the script file (i.e. in the
 #     tester's TMP folder) and are removed during cleanup.
 #     `ncat` executes them per connection — they must not be
@@ -153,16 +159,48 @@ ncat --listen 127.0.0.1 "$PORT" -k --sh-exec "$HANDLER" </dev/null >/dev/null 2>
 NCAT_PID=$!
 disown "$NCAT_PID" 2>/dev/null || true
 
-# wait for the port: until the server listens (with -k a probe costs no connection)
+# process lives (hint: a finished, not yet reaped child is a zombie —
+# `kill -0` still goes through on zombies, /proc says Z).
+_pid_alive() {
+  local pid="$1" line state
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -r "/proc/$pid/stat" ]]; then
+    line="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    state="${line##*) }"     # everything after the last ") " …
+    state="${state%% *}"     # … first field = process state
+    [[ "$state" == "Z" ]] && return 1
+  fi
+  return 0
+}
+
+# True if EXACTLY $pid listens on 127.0.0.1:$port. Without ss only the
+# weakened variant remains (lives + port open) — the normal case on all
+# target platforms is ss (lurk_watch.sh needs it anyway).
+_port_owned_by() {
+  local port="$1" pid="$2"
+  if command -v ss >/dev/null 2>&1; then
+    ss -Htanp "sport = :$port" 2>/dev/null | grep -qE "pid=${pid}[,)]"
+    return $?
+  fi
+  _pid_alive "$pid" || return 1
+  nc -z 127.0.0.1 "$port" 2>/dev/null
+}
+
+# port wait + bind proof (with -k the query costs no connection)
 listening=1
 for _ in $(seq 1 20); do
-  if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
+  if ! _pid_alive "$NCAT_PID"; then
+    echo "Error: fake server: ncat (PID $NCAT_PID) is gone — bind on port $PORT failed (in use?)" >&2
+    exit 1
+  fi
+  if _port_owned_by "$PORT" "$NCAT_PID"; then
     listening=0
     break
   fi
   sleep 0.1
 done
 if (( listening != 0 )); then
+  kill "$NCAT_PID" 2>/dev/null || true   # only OURS, NEVER the foreign listener
   echo "Error: fake server is not listening on port $PORT (in use?)" >&2
   exit 1
 fi

@@ -43,6 +43,46 @@ printf '%s\n%s\n' \
   '{"choices":[{"index":0,"message":{"role":"assistant","content":"Hello over HTTP!","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}' \
   '{"choices":[{"index":0,"message":{"role":"assistant","content":"Done.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}' > "$resp"
 
+contains() {
+  local desc="$1" needle="$2" hay="$3"
+  if [[ "$hay" == *"$needle"* ]]; then
+    printf '  [PASS] %s\n' "$desc"
+  else
+    printf '  [FAIL] %s (looked for: %q)\n' "$desc" "$needle" >&2
+    printf '         Text: %q\n' "$hay" >&2
+    FAIL=1
+  fi
+}
+
+# 1b. bind proof (audit finding M11): whoever holds the port gets NO
+#     "successful" start message. Before fake_server.sh only checked
+#     `nc -z` — that also hits the foreign listener if our ncat could not
+#     bind → the tests would have talked to the wrong server.
+BIND_PORT=$((20000 + RANDOM % 8000))
+ncat --listen 127.0.0.1 "$BIND_PORT" -k </dev/null >/dev/null 2>&1 &
+FOREIGN_PID=$!
+for _ in $(seq 1 30); do
+  nc -z 127.0.0.1 "$BIND_PORT" 2>/dev/null && break
+  sleep 0.1
+done
+bind_rc=0
+bind_out="$(bash "$SCRIPT_DIR/fake_server.sh" "$BIND_PORT" "$resp" 2>"$TMP/bind_err.txt")" || bind_rc=$?
+assert "fake_server (foreign listener -> rc != 0)" "1" "$([[ $bind_rc -ne 0 ]] && echo 1 || echo 0)"
+assert "fake_server (foreign listener -> no PID printed)" "0" "$([[ -n "$bind_out" ]] && echo 1 || echo 0)"
+assert "fake_server (foreign listener -> error message)" "1" \
+  "$([[ "$(cat "$TMP/bind_err.txt" 2>/dev/null)" == *"Error: fake server"* ]] && echo 1 || echo 0)"
+
+# M12 (audit 2026-10-08): fake_server reports the taken port in its wording
+# too. The second run must happen BEFORE the kill — after that the port is
+# free, fake_server started successfully, created a second listener that was
+# never cleaned up and never reported "taken". contains looks LITERAL, the
+# old needle was grep syntax (\|).
+bind2_out="$(bash "$SCRIPT_DIR/fake_server.sh" "$BIND_PORT" "$resp" 2>&1)" || true
+contains "fake_server (port taken reported)" "in use" "$bind2_out"
+
+kill "$FOREIGN_PID" 2>/dev/null || true
+wait "$FOREIGN_PID" 2>/dev/null || true
+
 # 2. start the fake server on a high port
 FAKE_PORT=$((20000 + RANDOM % 8000))
 FAKE_PID="$(bash "$SCRIPT_DIR/fake_server.sh" "$FAKE_PORT" "$resp")"
@@ -197,6 +237,37 @@ else
   FAIL=1
 fi
 unset LEX_API_RETRIES
+
+# 8. M5 (2026-10-08): `--server` queries the CONFIGURED origin (`_api_url`)
+#    instead of hardcoded 127.0.0.1:8080 — otherwise the status contradicted
+#    the server_hint and reported "not reachable" although the server was
+#    running on the configured port.
+HPORT=$((20000 + RANDOM % 8000))
+cat > "$TMP/health_srv.sh" <<'HEALTH_EOF'
+#!/bin/bash
+IFS= read -r _req || exit 0
+while IFS= read -r _l; do [[ -z "${_l%$'\r'}" ]] && break; done
+body='{"status":"ok"}'
+printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "${#body}" "$body"
+HEALTH_EOF
+ncat --listen 127.0.0.1 "$HPORT" -k --sh-exec "bash $TMP/health_srv.sh" </dev/null >/dev/null 2>&1 &
+HEALTH_PID=$!
+for _ in $(seq 1 30); do
+  nc -z 127.0.0.1 "$HPORT" 2>/dev/null && break
+  sleep 0.1
+done
+sout="$(LEX_API_URL="http://127.0.0.1:$HPORT/v1/chat/completions" bash "$LEX_DIR/lex" --server 2>&1)"
+src=$?
+assert "server (configured port answers /health)" "0" "$src"
+contains "server (health text from the configured port)" '"status":"ok"' "$sout"
+kill "$HEALTH_PID" 2>/dev/null || true
+wait "$HEALTH_PID" 2>/dev/null || true
+
+# Without a listener: error status instead of "not reachable" with rc 0.
+sout="$(LEX_API_URL="http://127.0.0.1:$HPORT/v1/chat/completions" bash "$LEX_DIR/lex" --server 2>&1)"
+src=$?
+assert "server (not reachable -> rc 1)" "1" "$src"
+contains "server (message names the configured origin)" "not reachable" "$sout"
 
 if (( FAIL > 0 )); then
   echo "FAILED: $FAIL test(s) in test_http.sh" >&2

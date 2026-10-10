@@ -4,16 +4,27 @@
 #   werkstatt_index.sh          rewrite the AUTO block
 #   werkstatt_index.sh --check  only print to stdout (dry run), rc=0
 #
-# Target:   $LEX_HTOOLS_DIR/WERKSTATT.md  (default /home/chaos/H-Tools)
+# Target:   $LEX_HTOOLS_DIR/WERKSTATT.md  (default ${HOME}/H-Tools)
 # Markers:  <!-- AUTO-START --> … <!-- AUTO-END --> (exactly one each)
 # Candidates: root binary OR directory inside the workshop folder;
 #   version only for executable files (no PATH lookup, full paths).
 set -euo pipefail
 
-HT="${LEX_HTOOLS_DIR:-/home/chaos/H-Tools}"
+HT="${LEX_HTOOLS_DIR:-${HOME}/H-Tools}"
 TARGET="$HT/WERKSTATT.md"
 CHECK=0
-[[ "${1:-}" == "--check" ]] && CHECK=1
+# M13 (audit 2026-10-08): reject foreign arguments hard. Before a typo
+# (`--chek`) was silently swallowed and the run WROTE — exactly the dry run
+# in question was ignored.
+(( $# <= 1 )) || {
+  echo "werkstatt_index: too many arguments ($#) — allowed: --check" >&2
+  exit 2
+}
+case "${1:-}" in
+  "") ;;
+  --check) CHECK=1 ;;
+  *) echo "werkstatt_index: unknown argument: $1 (known: --check)" >&2; exit 2 ;;
+esac
 
 # Workshop tools in the order of WERKSTATT.md; differing version flags
 declare -A VER_FLAG=([ffuf]="-V" [velociraptor]="version")
@@ -96,7 +107,10 @@ e_line="$(grep -nF '<!-- AUTO-END -->' "$TARGET" | tail -1 | cut -d: -f1)"
   exit 1
 }
 
-tmp="$(mktemp)" || exit 1
+# M13: temp file INSIDE the target directory — mktemp would otherwise land in
+# /tmp (tmpfs) and `mv` across the filesystem boundary is no atomic replace
+# any more (copy + delete, intermediate state readable).
+tmp="$(mktemp "$HT/.werkstatt_index.XXXXXX")" || exit 1
 trap 'rm -f "$tmp"' EXIT
 head -n "$((s_line - 1))" "$TARGET" > "$tmp"
 gen >> "$tmp"

@@ -190,6 +190,17 @@ source "$LEX_DIR/lex" < /dev/null > /dev/null 2>&1 || {
   exit 1
 }
 
+# Audit gap 2026-10-08: the source anchor above only checks the keyword
+# `_tools_off:-}` — the BODY was never checked. Functional here, after the
+# source: the compaction's summary request must deliver EXACTLY [], the
+# normal request must contain the tool schemas.
+tb_on="$(_build_tools)"
+_tools_off=1
+tb_off="$(_build_tools)"
+_tools_off=""
+assert "tools_off (summary request exactly [])" "[]" "$tb_off"
+contains "tools_off (normal request contains tools)" '"name": "browser"' "$tb_on"
+
 # --- _pairing_ok -----------------------------------------------------------
 pair_ok='[{"role":"system","content":"s"},{"role":"user","content":"u"},{"role":"assistant","content":"a"}]'
 _pairing_ok <<< "$pair_ok" >/dev/null 2>&1 && check "pairing (valid) " 1 || check "pairing (valid)" 0

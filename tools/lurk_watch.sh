@@ -8,10 +8,13 @@
 #   --status          baseline/alert state
 #   --stop            remove the run marker (baseline and alerts stay)
 #
-# Rules (P1): fail2ban ban delta, auth failure delta, new external peers,
+# Rules (P1): fail2ban ban delta, auth failure delta, successful logins
+# (audit H4 2026-10-08 — before the watcher only saw errors, a fresh
+# root login stayed invisible), new external peers,
 # new neighbours, new listening ports, changed key files.
-# After every --check the snapshots are advanced — a deviation is
-# therefore reported EXACTLY ONCE.
+# After every --check the snapshots are advanced (atomically, M8) —
+# a deviation is therefore reported EXACTLY ONCE, even with two
+# concurrent --check runs.
 #
 # Paths/sources redirectable via ENV (tests):
 #   LEX_LURK_DIR          state directory     (default ~/.lex/lurk)
@@ -39,12 +42,25 @@ KEY_FILES="${LEX_LURK_FILES:-${HOME}/.ssh/authorized_keys /etc/sudoers /etc/ssh/
 die() { printf 'lurk_watch: %s\n' "$*" >&2; exit 2; }
 now() { date -Is; }
 
+# M8 (2026-10-08): advance snapshots atomically. Before it was truncated
+# with `>` and rewritten — a parallel `--check` read a half-emptied file,
+# `comm` treated the entire baseline as "new" and the alarm flood stood.
+# Temp file in the same directory + `mv` (rename is atomic): readers only
+# see the old or the new file, never a fragment.
+_snap_write() { # $1 = target, content on stdin
+  local dst="$1" tmp
+  tmp="$(mktemp "$DIR/.snap.XXXXXX")" || die "cannot create snapshot temp: $DIR"
+  cat > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$dst" || { rm -f "$tmp"; die "snapshot not writable: $dst"; }
+}
+
 snap_peers() { # external ESTAB/SYN-RECV peers (IP without port)
   if [[ -n "${LEX_LURK_SS_SNAP:-}" ]]; then
     cat "${LEX_LURK_SS_SNAP}"
   else
     ss -Htan 2>/dev/null || true
-  fi | awk '$1 == "ESTAB" || $1 == "SYN-RECV" { print $4 }' | sed 's/:[0-9]*$//' | sort -u
+  fi | awk '$1 == "ESTAB" || $1 == "SYN-RECV" { print $5 }' | sed 's/:[0-9]*$//' | sort -u
 }
 
 snap_ports() { # listening TCP ports (local)
@@ -86,26 +102,42 @@ au_count() { # auth failure count or -1
   printf '%s' "${c:-0}"
 }
 
+# Successful logins (sshd: "Accepted password|publickey|keyboard-interactive
+# for ..."). Audit H4 (2026-10-08): own counter instead of mixing with the
+# errors — otherwise an error delta masks login success.
+login_count() {
+  [[ -r "$AU_LOG" ]] || { printf '%s' "-1"; return 0; }
+  local c
+  c="$(grep -cE 'Accepted (password|publickey|keyboard-interactive|gssapi-with-mic|hostbased)' "$AU_LOG" 2>/dev/null || true)"
+  printf '%s' "${c:-0}"
+}
+
 alert() { # $1 = sev, $2 = rule, $3 = msg (into the alerts file + stdout)
-  local msg="$3"
-  msg="${msg//$'\n'/ }"
-  msg="${msg//$'\r'/ }"
-  msg="${msg//\"/\'}"
-  printf '{"ts":"%s","sev":"%s","rule":"%s","msg":"%s"}\n' \
-    "$(now)" "$1" "$2" "$msg" >> "$ALERTS"
-  printf 'ALERT [%s] %s: %s\n' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" "$2" "$msg"
+  local sev="$1" rule="$2" msg="$3" line out
+  # M9 (2026-10-08): the alerts file is JSONL — the hand-built format
+  # escaped neither backslash nor control characters; a `"` from the auth log
+  # produced an unparseable line (jq aborts, --alerts returns garbage).
+  # jq builds the line — the only place that really does it right.
+  line="$(jq -cn --arg ts "$(now)" --arg sev "$sev" --arg rule "$rule" \
+    --arg msg "$msg" '{ts:$ts,sev:$sev,rule:$rule,msg:$msg}')" \
+    || die "alert not representable as JSON: $msg"
+  printf '%s\n' "$line" >> "$ALERTS"
+  out="${msg//$'\n'/ }"
+  out="${out//$'\r'/ }"
+  printf 'ALERT [%s] %s: %s\n' \
+    "$(printf '%s' "$sev" | tr '[:lower:]' '[:upper:]')" "$rule" "$out"
 }
 
 do_start() {
   mkdir -p "$DIR" || die "cannot create state directory: $DIR"
   chmod 700 "$DIR" 2>/dev/null || true
   [[ -f "$ALERTS" ]] || : > "$ALERTS"
-  snap_peers > "$BASE.peers"
-  snap_ports > "$BASE.ports"
-  snap_neigh > "$BASE.neigh"
-  snap_hashes > "$BASE.hashes"
-  printf 'fb=%s\nau=%s\n' "$(fb_count)" "$(au_count)" > "$COUNTS"
-  now > "$BASE.ts"
+  snap_peers | _snap_write "$BASE.peers"
+  snap_ports | _snap_write "$BASE.ports"
+  snap_neigh | _snap_write "$BASE.neigh"
+  snap_hashes | _snap_write "$BASE.hashes"
+  printf 'fb=%s\nau=%s\nlogin=%s\n' "$(fb_count)" "$(au_count)" "$(login_count)" | _snap_write "$COUNTS"
+  now | _snap_write "$BASE.ts"
   : > "$RUN"
   printf 'lurk: baseline created (%s) — %s peers, %s listening ports\n' \
     "$(now)" "$(wc -l < "$BASE.peers")" "$(wc -l < "$BASE.ports")"
@@ -132,7 +164,13 @@ do_check() {
   fb_now="$(fb_count)"
   fb_old="$(awk -F= '/^fb=/{print $2}' "$COUNTS" 2>/dev/null || true)"
   if [[ "$fb_now" =~ ^[0-9]+$ && "${fb_old:-}" =~ ^[0-9]+$ ]] && (( fb_now > fb_old )); then
-    alert high fail2ban "$((fb_now - fb_old)) new ban(s) — last: $(tail -n1 "$FB_LOG" 2>/dev/null | tr -d '\n')"
+    # FIX (2026-10-09): last "Ban" line instead of the last log line.
+    # tail -n1 "$FB_LOG" grabs a "Found X" (filter) line, not the actual
+    # ban (actions) line → wrong IP in the alert.
+    local last_ban
+    last_ban="$(grep ' Ban ' "$FB_LOG" 2>/dev/null | tail -n1 | tr -d '\n')"
+    [[ -n "$last_ban" ]] || last_ban="$(tail -n1 "$FB_LOG" 2>/dev/null | tr -d '\n')"
+    alert high fail2ban "$((fb_now - fb_old)) new ban(s) — last: $last_ban"
     rc=1
   fi
 
@@ -141,7 +179,27 @@ do_check() {
   au_now="$(au_count)"
   au_old="$(awk -F= '/^au=/{print $2}' "$COUNTS" 2>/dev/null || true)"
   if [[ "$au_now" =~ ^[0-9]+$ && "${au_old:-}" =~ ^[0-9]+$ ]] && (( au_now > au_old )); then
-    alert high auth "$((au_now - au_old)) new auth failures — last: $(tail -n1 "$AU_LOG" 2>/dev/null | tr -d '\n')"
+    # FIX (2026-10-09): last auth failure instead of the last log line.
+    # tail -n1 "$AU_LOG" is often "Connection closed by invalid user"
+    # (not a failure line) → wrong line in the alert.
+    local last_au
+    last_au="$(grep -E 'Failed password|authentication failure' "$AU_LOG" 2>/dev/null | tail -n1 | tr -d '\n')"
+    [[ -n "$last_au" ]] || last_au="$(tail -n1 "$AU_LOG" 2>/dev/null | tr -d '\n')"
+    alert high auth "$((au_now - au_old)) new auth failures — last: $last_au"
+    rc=1
+  fi
+
+  # R2b successful logins (audit H4 2026-10-08: before invisible)
+  local log_now log_old
+  log_now="$(login_count)"
+  log_old="$(awk -F= '/^login=/{print $2}' "$COUNTS" 2>/dev/null || true)"
+  if [[ "$log_now" =~ ^[0-9]+$ && "${log_old:-}" =~ ^[0-9]+$ ]] && (( log_now > log_old )); then
+    # FIX (2026-10-09): last successful login instead of the last log line.
+    # tail -n1 "$AU_LOG" is almost never an Accepted entry → wrong line.
+    local last_login
+    last_login="$(grep -E 'Accepted (password|publickey|keyboard-interactive|gssapi-with-mic|hostbased)' "$AU_LOG" 2>/dev/null | tail -n1 | tr -d '\n')"
+    [[ -n "$last_login" ]] || last_login="$(tail -n1 "$AU_LOG" 2>/dev/null | tr -d '\n')"
+    alert high login "$((log_now - log_old)) new successful login(s) — last: $last_login"
     rc=1
   fi
 
@@ -167,12 +225,15 @@ do_check() {
 
   # Advance snapshots → report each deviation EXACTLY ONCE
   if [[ -z "${LEX_LURK_NO_SNAP:-}" ]]; then
-    snap_peers > "$BASE.peers"
-    snap_ports > "$BASE.ports"
-    snap_neigh > "$BASE.neigh"
-    printf '%s\n' "$hnew" > "$BASE.hashes"
-    printf 'fb=%s\nau=%s\n' "$fb_now" "$au_now" > "$COUNTS"
-    touch "$RUN" 2>/dev/null || true
+    snap_peers | _snap_write "$BASE.peers"
+    snap_ports | _snap_write "$BASE.ports"
+    snap_neigh | _snap_write "$BASE.neigh"
+    printf '%s\n' "$hnew" | _snap_write "$BASE.hashes"
+    printf 'fb=%s\nau=%s\nlogin=%s\n' "$fb_now" "$au_now" "$log_now" | _snap_write "$COUNTS"
+    # M10 (audit 2026-10-08): the marker .running means "watcher running"
+    # and belongs only to --start/--stop. Before a plain --check silently
+    # recreated it after --stop and --status reported "run active".
+    [[ -f "$RUN" ]] && touch "$RUN" 2>/dev/null
   fi
 
   if (( rc == 0 )); then

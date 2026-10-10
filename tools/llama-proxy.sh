@@ -208,9 +208,61 @@ _running() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
+# Audit H5 (2026-10-08): is our ncat listener really running under this PID?
+# After a crash the PID file keeps lying around, the PID gets reused by the
+# system — a blind `kill` then ends a foreign process.
+_is_our_proxy() { # $1 = pid
+  local p="$1" a=""
+  if [[ -r "/proc/$p/cmdline" ]]; then
+    a="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+  elif command -v ps >/dev/null 2>&1; then
+    a="$(ps -p "$p" -o args= 2>/dev/null)"
+  else
+    return 0   # no way to check → kill -0 (above) stays the minimum
+  fi
+  [[ "$a" == *ncat* && "$a" == *--listen* ]]
+}
+
+# Audit M7 (2026-10-08): bind proof — the port really belongs to THIS PID
+# (same trick as test/fake_server.sh M11). `nc -z` alone only proves that
+# SOMEONE answers, and it also runs against a foreign listener.
+_port_owned_by() { # $1 = port, $2 = pid
+  local port="$1" p="$2" own=""
+  kill -0 "$p" 2>/dev/null || return 1
+  command -v ss >/dev/null 2>&1 || return 0   # no ss → minimum PID alive
+  own="$(ss -Htanp "sport = :$port" 2>/dev/null | grep -oE "pid=${p}[,)]" | head -n 1)"
+  [[ -n "$own" ]]
+}
+
+# Audit M6 (2026-10-08): `ncat --sh-exec` hangs a handler plus curl
+# (max-time 900) on the listener per connection — a plain ncat kill let the
+# orphans run on until the timeout. Recursive, children FIRST, so nothing
+# detaches from the root.
+_kill_tree() { # $1 = pid, $2 = signal (default TERM)
+  local p="$1" sig="${2:-TERM}" c
+  if command -v pgrep >/dev/null 2>&1; then
+    while IFS= read -r c; do
+      [[ -n "$c" ]] && _kill_tree "$c" "$sig"
+    done < <(pgrep -P "$p" 2>/dev/null || true)
+  fi
+  kill -"$sig" "$p" 2>/dev/null || true
+}
+
 cmd_start() {
   PORT="${1:-$PORT}"
-  if [[ "$PORT" == "8080" ]]; then
+  # Audit M7 (2026-10-08): so far PORT went UNVALIDATED into ss/nc arguments
+  # and the 8080 lock was a plain string comparison ("08080" bypassed it).
+  # Check first, then normalize (10# against the octal trap), then lock.
+  if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]]; then
+    echo "Error: port must be 1-5 digits (is: $PORT)." >&2
+    exit 1
+  fi
+  PORT="$((10#$PORT))"
+  if (( PORT < 1 || PORT > 65535 )); then
+    echo "Error: port must be between 1 and 65535 (is: $PORT)." >&2
+    exit 1
+  fi
+  if (( PORT == 8080 )); then
     echo "Error: port 8080 is the real llama-server — use a high port." >&2
     exit 1
   fi
@@ -237,14 +289,29 @@ cmd_start() {
   printf '%s\n' "$PORT" > "${DIR}/proxy.port"
   printf '%s\n' "$UPSTREAM" > "${DIR}/proxy.upstream"
 
-  local listening=1
-  for _ in $(seq 1 30); do
-    if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then listening=0; break; fi
+  # Audit M7 (2026-10-08): success only with BIND PROOF (PID + port) — before
+  # a bare `nc -z` only checked the PORT, never killed ncat on its error path
+  # and ignored proxy.out: a foreign listener made the start "green", a
+  # crashed ncat went unnoticed.
+  local listening=1 _i
+  for _i in $(seq 1 30); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "Error: ncat (PID $pid) is gone — bind on port $PORT failed (see ${DIR}/proxy.out):" >&2
+      tail -n 3 "${DIR}/proxy.out" 2>/dev/null >&2 || true
+      rm -f "$(_pidfile)"
+      exit 1
+    fi
+    if _port_owned_by "$PORT" "$pid"; then listening=0; break; fi
     sleep 0.1
   done
   if (( listening != 0 )); then
-    echo "Error: proxy is not listening on port $PORT (see ${DIR}/proxy.out)" >&2
-    kill "$pid" 2>/dev/null
+    echo "Error: proxy is not listening on port $PORT (port taken? see ${DIR}/proxy.out)" >&2
+    _kill_tree "$pid"
+    for _i in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$pid" 2>/dev/null && _kill_tree "$pid" KILL
     rm -f "$(_pidfile)"
     exit 1
   fi
@@ -255,11 +322,38 @@ cmd_start() {
 cmd_stop() {
   local pid
   pid="$(cat "$(_pidfile)" 2>/dev/null)"
-  if [[ -n "${pid:-}" ]]; then
-    kill "$pid" 2>/dev/null && echo "Proxy stopped (PID $pid)."
-  else
+  if [[ -z "${pid:-}" ]]; then
     echo "No PID file under $DIR."
+    rm -f "$(_pidfile)" "${DIR}/proxy.port"
+    return 0
   fi
+  # Audit H5 (2026-10-08): before the kill check whether the PID still exists
+  # at all and whether it belongs to our ncat — otherwise stop kills a
+  # reused foreign PID.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "Proxy no longer active (PID $pid orphaned) — PID file removed."
+    rm -f "$(_pidfile)" "${DIR}/proxy.port"
+    return 0
+  fi
+  if ! _is_our_proxy "$pid"; then
+    echo "Error: PID $pid does not belong to the proxy ($(ps -p "$pid" -o args= 2>/dev/null | tr -d '\n')) — nothing killed, PID file removed." >&2
+    rm -f "$(_pidfile)" "${DIR}/proxy.port"
+    return 1
+  fi
+  # Audit M6 (2026-10-08): take the subtree down too — handlers and their curl
+  # (max-time 900) survived the ncat kill as orphans. First TERM recursively,
+  # then wait at most 2 s, then KILL against refusers.
+  _kill_tree "$pid"
+  local _i
+  for _i in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "Proxy does not react to TERM — KILL (PID $pid)." >&2
+    _kill_tree "$pid" KILL
+  fi
+  echo "Proxy stopped (PID $pid)."
   rm -f "$(_pidfile)" "${DIR}/proxy.port"
 }
 

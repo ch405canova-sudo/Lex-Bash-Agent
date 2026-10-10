@@ -1,6 +1,6 @@
 # lex
 
-A pure-Bash LLM terminal agent (v0.2.1) for a **local** llama-server.
+A pure-Bash LLM terminal agent (v0.3.0) for a **local** llama-server.
 Core dependencies: `bash`, `jq`, `curl` — optionally `node` for the MCP
 tools and `python3` for two test fixtures. No Docker, no Python runtime,
 no compiled helper.
@@ -53,11 +53,12 @@ REPL slash commands — exactly as listed by `lex --help`:
 | `/plan` | show the current plan (todo list) |
 | `/lexpen` | set system prompt to the Lex persona (senior-engineer style) |
 | `/autosudo` | automatically answer y/N approvals in the sudo gate (`on\|off\|status`) |
+| `/lexlurk` | switch to the lurk watch (blue-team watcher persona, `on\|off\|status\|alerts [n]\|check`) |
 | `/lex` | back to the original prompt |
 | `/help` | this help |
 | `/exit`, `/quit` | leave the REPL (also Ctrl-D) |
 
-## Tools (17)
+## Tools (19)
 
 `read_file`, `write_file`, `edit_file` (with `all` for every occurrence),
 `append_file`, `bash`, `list_files` (+ `pattern`, `recursive`), `search`,
@@ -75,6 +76,11 @@ REPL slash commands — exactly as listed by `lex --help`:
   → snapshot → click/type by ref
 - `mcp(server, tool, arguments?)` — generic MCP access, including the
   `desktop` and `postgres` servers
+- `agent(task, mode)` — sub-agent with a **fresh context** (explore/
+  plan/review/summarize), depth gate, the result is plain text output
+- `task(action, command?, id?, name?, tail?)` — **background tasks**
+  (start/list/status/result/kill) under `~/.lex/tasks/<id>/`, they keep
+  running in their own session and stay readable after lex exits
 
 Memory lives as Markdown with YAML frontmatter under `~/.lex/mem/`
 (types: `memory`, `fact`, `preference`, `note`).
@@ -233,10 +239,11 @@ dependencies:
 - `⚙ thinking:` — what the model thought (`reasoning_content`): header
   dim-magenta, content **grey and indented** on stderr — deliberately
   separated so thinking and answer are never confused; off with
-  `LEX_SHOW_REASONING=0`, truncation via `LEX_REASONING_MAX` (default 4000)
+  `LEX_SHOW_REASONING=0`, `LEX_REASONING_MAX` (default 0 = complete, no truncation)
 - `⏳ thinking …` spinner while generating (starts only after 250 ms)
 - `⚙ tool args` for running tools: name **bold cyan**, arguments grey;
-  `↳ tool` (cyan-dim) with an indented return value truncated to 8 lines
+  `↳ tool` (cyan-dim) with an indented return value (default
+  `LEX_TRACE_RESULT_MAX=0` = complete, no truncation)
 - `⏱ 3.2s · turn 2/50 · tokens 1409/262144 (1%) prompt + 69 completion` —
   with a context limit the HUD shows the fill level as `X/Y (Z%)` (without
   a limit the plain `tokens N` form stays, missing usage shows `?`) — and the
@@ -400,7 +407,7 @@ LEX_COMPACT_BUFFER)`.
 ## Tests
 
 ```bash
-./test/run_all.sh          # 13 runners / 750 checks (750 PASS + 1 SKIP), exit 0 only when all are green
+./test/run_all.sh          # 13 runners / 1174 [PASS] = 1161 checks, exit 0 only when all are green
 shellcheck -S warning lex ai.sh install.sh test/*.sh tools/*.sh
 ```
 
@@ -463,7 +470,7 @@ port 8080.
 ## Structure
 
 ```
-lex              the agent — one file, 4969 lines, 17 tools
+lex              the agent — one file, 5998 lines, 19 tools
 ai.sh            llama-server launcher (all paths via environment)
 install.sh       interactive setup
 LEX.md           working document (state, bugs, roadmap)

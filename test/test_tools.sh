@@ -55,6 +55,24 @@ tool_write_file "$TMP/a/b/c.txt" "Hello world" >/dev/null 2>&1
 content="$(cat "$TMP/a/b/c.txt")"
 assert "write_file (content + directory)" "Hello world" "$content"
 
+# 10b. Audit H2 (2026-10-08): "" ended up in the CWD via safe_path and a
+#      directory path swallowed the tmp-MV — both reported "written" and
+#      left .lex-write.* dotfiles behind. Now error path + rc 1.
+out="$(tool_write_file "" "x" 2>&1)"; rc=$?
+assert "write_file (empty path -> rc 1)" "1" "$rc"
+assert "write_file (empty path -> message)" "1" \
+  "$([[ "$out" == *"empty path"* ]] && echo 1 || echo 0)"
+out="$(tool_write_file "$TMP" "x" 2>&1)"; rc=$?
+assert "write_file (directory -> rc 1)" "1" "$rc"
+assert "write_file (directory -> message)" "1" \
+  "$([[ "$out" == *"is a directory"* ]] && echo 1 || echo 0)"
+assert "write_file (no .lex-write. dotfile)" "0" \
+  "$(find "$TMP" -maxdepth 1 -name '.lex-write.*' 2>/dev/null | wc -l)"
+out="$(tool_append_file "" "x" 2>&1)"; rc=$?
+assert "append_file (empty path -> rc 1)" "1" "$rc"
+out="$(tool_append_file "$TMP" "x" 2>&1)"; rc=$?
+assert "append_file (directory -> rc 1)" "1" "$rc"
+
 # 11. tool_read_file: reads the written file
 content="$(tool_read_file "$TMP/a/b/c.txt")"
 assert "read_file" "Hello world" "$content"

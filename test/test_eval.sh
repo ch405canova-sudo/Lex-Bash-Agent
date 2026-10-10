@@ -179,8 +179,10 @@ fi
 printf '  [INFO] cmd_eval (missing file)\n'
 out="$(cmd_eval "$TMP/nonexistent.jsonl" 2>&1)"
 rc=$?
-if (( rc == 0 )) && [[ "$out" == *"No span log found"* ]]; then
-  printf '  [PASS] cmd_eval: missing file\n'
+# M4 (2026-10-08): "no spans" is an error state — before rc 0, so
+# `lex --eval` without data reported success anyway.
+if (( rc == 1 )) && [[ "$out" == *"No span log found"* ]]; then
+  printf '  [PASS] cmd_eval: missing file (rc 1)\n'
 else
   printf '  [FAIL] cmd_eval: missing file (rc=%d)\n' "$rc" >&2
   FAIL=1
@@ -194,6 +196,31 @@ out="$(bash "$LEX_DIR/lex" --eval "$SPAN_FILE" 2>&1)"
 rc=$?
 assert "lex --eval: rc" "0" "$rc"
 contains "lex --eval: header" "Trace-level evaluation" "$out"
+
+# ===========================================================================
+# 8. N7: `lex --eval --approve <file>` — --approve must not be eaten as a
+#    filename (flags in any order).
+# ===========================================================================
+printf '  [INFO] lex --eval --approve (flag position)\n'
+out="$(bash "$LEX_DIR/lex" --eval --approve "$SPAN_FILE" 2>&1)"
+rc=$?
+assert "lex --eval --approve: rc" "0" "$rc"
+contains "lex --eval --approve: evaluates" "Trace-level evaluation" "$out"
+
+# ===========================================================================
+# 9. M4: settings-`log_dir` reaches the evaluator (own LEX_HOME without a
+#    `log/` folder — otherwise the hard default would find the file too).
+# ===========================================================================
+printf '  [INFO] lex --eval (settings-log_dir)\n'
+mkdir -p "$TMP/settingslog" "$TMP/evalhome"
+cp "$SPAN_FILE" "$TMP/settingslog/spans.jsonl"
+jq -n --arg d "$TMP/settingslog" '{log_dir:$d}' > "$TMP/evalhome/settings.json"
+out="$(env -u LEX_LOG_DIR LEX_HOME="$TMP/evalhome" LEX_MODEL="$TMP/model.gguf" \
+  LEX_MOCK=done bash "$LEX_DIR/lex" --eval 2>&1)"
+rc=$?
+assert "lex --eval settings-log_dir: rc" "0" "$rc"
+contains "lex --eval settings-log_dir: span file found" "Trace-level evaluation" "$out"
+rm -f "$TMP/evalhome/settings.json"
 
 echo ""
 if (( FAIL > 0 )); then

@@ -332,6 +332,12 @@ _compact_warned=0
 _load_settings() {
   local file="$1"
   [[ -f "$file" ]] || return 0
+  # M3 (audit 2026-10-08): no longer swallow a broken settings.json silently —
+  # before `2>/dev/null` + `&&` + `return 0` produced DEFAULT values for EVERY
+  # jq error (missing keys are normal, syntax errors are not).
+  if ! jq -e . "$file" >/dev/null 2>&1; then
+    log "settings: $file is not valid JSON — using defaults ($(jq . "$file" 2>&1 | head -n 1 | cut -c1-160))"
+  fi
   local v
   v="$(jq -r '.api_url // empty' "$file" 2>/dev/null)"   && [[ -n "${v:-}" ]] && _api_url="$v"
   v="$(jq -r '.api_key // empty' "$file" 2>/dev/null)"   && [[ -n "${v:-}" ]] && _api_key="$v"
@@ -350,6 +356,10 @@ _load_settings() {
   v="$(jq -r '.compact_keep // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_keep="$v"
   v="$(jq -r '.compact_buffer // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _compact_buffer="$v"
   v="$(jq -r '.auto_disable_thinking_with_tools // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _auto_disable_thinking_with_tools="$v"
+  # M3: these two keys existed only as ENV/default — once entered into
+  # settings.json they were ignored before.
+  v="$(jq -r '.max_nudges // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _max_nudges="$v"
+  v="$(jq -r '.silent_turns // empty' "$file" 2>/dev/null)" && [[ -n "${v:-}" ]] && _silent_turns="$v"
   # Explicit 0: otherwise the last jq chain ends with status 1 when the key
   # is missing (the normal case) — callers must be able to rely on it.
   return 0
@@ -364,10 +374,15 @@ _int_or() {
   esac
 }
 _float_or() {
-  case "$1" in
-    ''|*[!0-9.]*|*.*.*) printf '%s\n' "$2" ;;
-    *) printf '%s\n' "$1" ;;
-  esac
+  # N8 (audit 2026-10-08): the old case list let "." through (a single dot
+  # contains neither a foreign character nor two dots) — and so did "1.".
+  # Both made `jq --argjson temp …` in the request body fail with rc 2, which
+  # aborted EVERY turn. Now: a real number with at least one digit.
+  if [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
 }
 # Carry the template's file mode over to the temp file (mktemp gives 600):
 # otherwise edit_file/todo would strip world-readable permissions (P2).
@@ -497,9 +512,12 @@ _redact() {
     out="${out//$_api_key/<REDACTED-TOKEN>}"
   fi
   # Prefilter: start the sed chain only for candidate words — otherwise every
-  # log line would pay for a fork in the hot path.
-  case "$out" in
-    *[Pp]ass*|*[Ss]ecret*|*[Tt]oken*|*[Kk]ey*|*[Aa]uth*|*Bearer*|*://*@*|*sk-*|*xox*) ;;
+  # log line would pay for a fork in the hot path. Comparison via lowercase
+  # (finding 2026-10-08): `[Pp]ass` only made the first letter flexible,
+  # `PASSWORD=`/`TOKEN=`/`KEY=` otherwise survived the prefilter and reached
+  # the log unredacted — although the sed chain itself carries /I.
+  case "${out,,}" in
+    *pass*|*secret*|*token*|*key*|*auth*|*bearer*|*://*@*|*sk-*|*xox*|*user:*|*login*) ;;
     *) printf '%s%s' "$out" "$trail"; return 0 ;;
   esac
   # The value group must stay JSON-safe (found by the live test 2026-10-06):
@@ -508,8 +526,17 @@ _redact() {
   # an unescaped " is left behind and the line in session.jsonl is no longer
   # valid JSON (the live session broke exactly that way). Price: a value
   # containing \ is only redacted up to the \ — better than broken JSONL.
+  # Three levels instead of one: (a) double quotes, (b) single quotes,
+  # (c) unquoted. The quotes land in their own groups and are carried along
+  # in the replacement — otherwise the redactor destroys the JSON validity
+  # of session.jsonl (finding 2026-10-08, audit H1: neither
+  # `{"password": "x"}` nor `PASSWORD=`/`TOKEN=` were caught before —
+  # prefilter case-sensitive, sed prefix demanded =: directly without `"`).
   out="$(printf '%s' "$out" | sed -E \
-    -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]]*[=:][[:space:]]*)(\\?"[^"\\]*\\?"|'"'"'[^'"'"']*'"'"'|[^[:space:],;)"'"'"'\\]+)/\1<REDACTED>/Ig' \
+    -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]"'"'"']*[=:][[:space:]]*)(\\?")([^"\\]*)(\\?")/\1\4<REDACTED>\6/Ig' \
+    -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]"'"'"']*[=:][[:space:]]*)('"'"')([^'"'"']*)('"'"')/\1\4<REDACTED>\6/Ig' \
+    -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]"'"'"']*[=:][[:space:]]*)([^[:space:],;)"'"'"'\\]+)/\1<REDACTED>/Ig' \
+    -e 's/(user(name)?|login)[[:space:]"'"'"']*[=:][[:space:]"'"'"']*[^[:space:]@/"'"'"']+@/\1:<REDACTED>@/Ig' \
     -e 's/(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{6,}/\1 <REDACTED>/Ig' \
     -e 's/(^|[^[:alnum:]])(sk|pk|ghp|gho|ghu|ghs|glpat|xox[baprs]|github_pat)[-_][A-Za-z0-9_-]{6,}/\1<REDACTED-TOKEN>/g' \
     -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://[^/:@[:space:]"\\]+):[^@[:space:]"\\]+@#\1:<REDACTED>@#g')"
@@ -605,12 +632,13 @@ Personality & style:
 "
 _prompt_ops="- **You verify with tools, not in your head:** \`bash -n\`, \`./test/run_all.sh\`, \`search\`, \`read_file\` and the logs are where certainty comes from — not from rethinking. If something is open, say clearly as a fact what is missing; that is a finding, not uncertainty.
 - **Thinking has an end:** check any one thing at most once with a tool — once the result arrived it is fact, not subject to further deliberation; deliberate only if the first check failed. If the thought circles (same point checked twice, finding only counter-checked), the answer is done — say it out instead of brooding on.
-- **Never guess, look it up:** for commands and flags use \`bash\` with \`<command> --help\`, for facts \`search\` (project and wiki) or \`web_search(query)\`/\`web_fetch(url)\`, for libraries and frameworks \`context7(...)\`. Only when research turns up nothing do you say openly what you don't know — a clear gap beats a fabricated answer.
+- **Never guess, look it up:** for commands and flags use \`bash\` with \`<command> --help\` — **BEFORE you run an unfamiliar command for the first time whose flags you are not SURE about: the help first, never guess**; ideally \`<command> --help | head -30 && <command> <correct flags>\` in ONE bash run, so the right attempt continues directly and you don't lose a turn to guessing. For facts \`search\` (project and wiki) or \`web_search(query)\`/\`web_fetch(url)\`, for libraries and frameworks \`context7(...)\`. Only when research turns up nothing do you say openly what you don't know — a clear gap beats a fabricated answer.
 - **Substantiate or name it:** anything you can substantiate neither in the repo nor in the wiki (\`search\` you fetch with \`web_search(query)\`/\`web_fetch(url)\` — only afterwards is 'I don't know' the right answer. A plausible idea does not replace a source.
+- **Your project lies EXCLUSIVELY in ${_lex_repo_dir}** — the script, LEX.md, README.md, CLAUDE.md, CHANGELOG.md, test/ and tools/ live there. From there you read, search, test and correct. ${_ai_dir}/Repo-Lex is only an external GitHub push copy (EN port) and plays no role for ongoing operation — do NOT treat it as the project state and never work on it when 'the project' is mentioned. ${_wiki_dir} is memory and log only (index/log/errors), not the project.
 - **Errors are material:** when something fails, first find the cause (\`search\`, log files, \`mem_search\` for earlier failures), then the fix. Write the fix down: one line in ${_wiki_dir}/wiki/log.md, and for recurring problems a page at ${_wiki_dir}/wiki/errors/YYYY-MM-DD-<short>.md. Next time look there first instead of reinventing it.
 - **For humans at a terminal:** structure where it helps (short bullets, tables for comparisons and values), otherwise two to five sentences. No how-to tone, no repeating the question.
 
-You have 17 tools:
+You have 19 tools:
 - read_file(path): reads a file and returns its contents.
 - write_file(path, content): writes a file (overwrites an existing file).
 - edit_file(path, old, new, all=false): replaces the first occurrence of 'old' with 'new'; with all:true it replaces every occurrence.
@@ -627,6 +655,8 @@ You have 17 tools:
 - context7(query, library?): current documentation for libraries/frameworks (MCP context7) — the counterweight to your trained, possibly stale knowledge. library is optional; without it the matching library is searched for.
 - browser(action, url?, ref?, element?, text?, key?, index?): drives a real browser (MCP playwright, system Chrome) — clicks, typing, navigation, freely usable. Most important cycle: navigate(url) → snapshot() (returns elements with a ref, e.g. ref=s1e44) → click/ref or type/ref from that. action ∈ navigate|snapshot|click|type|press|back|tabs|close|wait; tabs picks a tab by index (no index = list). Refs are only valid until the page changes: AFTER back/click/press(Enter) and on a ref-not-found error take a fresh snapshot first (use action=wait with seconds if the page still loads), then use the new ref.
 - mcp(server, tool, arguments?): generic MCP access to any configured server. Order: first mcp(server, '__tools') to read the tool list, then mcp(server, tool, arguments) with the JSON of the arguments. A server error tells you which servers are configured.
+- agent(task, mode?): sub-agent with its own, fresh context (mode ∈ explore|plan|review|summarize) — offload longer exploration, planning, reviews or summaries so your main context stays free. Returns only the result, never the intermediate steps.
+- task(action, command?, id?, name?, tail?): background task for long commands — start launches it detached (own session, survives lex), list shows all, status the single state, result the output, kill ends it. Output lies under ~/.lex/tasks/<id>/out.log; same rules as bash (deny list, sudo gate).
 - fetch(url, topic): downloads a web page and stores it as a raw source under <wiki>/raw/<topic>/YYYY-MM-DD-slug.md (metadata header per the wiki template). Returns the path and the beginning of the content so you can triage immediately. topic is an existing folder under raw/ (check existing ones with list_files).
 
 Wiki under ${_wiki_dir} (Karpathy layout):
@@ -700,6 +730,11 @@ _lexpen_active=""
 # Session JSONL (spec §6.5): append-only, one message per line
 # ---------------------------------------------------------------------------
 session_init() {
+  # M2 (audit 2026-10-08): idempotent. `agent_loop` builds the context and
+  # hands the pipe case to `oneshot`, which calls `setup_messages` again —
+  # before, a SECOND orphan session was created next to it every time, and
+  # `/status` counted it (sessions/ grew by one dummy entry per run).
+  [[ -n "${_session_file:-}" ]] && return 0
   _session_file=""
   case "${_session_enabled:-1}" in
     0|false|no|off|"") return 0 ;;
@@ -840,6 +875,98 @@ _wiki_ex() {
   printf '%s' "$mem_ex"
 }
 
+# ---------------------------------------------------------------------------
+# 5/6 skills (power round 2026-10-08): automatic SKILL.md injection.
+#
+# Every folder under ${_lex_home}/skills/<name>/ holding a SKILL.md ends up in
+# the system prompt with its frontmatter (name, description) AND body — small
+# reusable instructions, without needing a 19th tool for that. Without folder,
+# without file or with LEX_SKILLS=off the prompt stays unchanged (empty output
+# -> setup_messages appends nothing).
+# Gates: LEX_SKILLS=off, LEX_SKILL_MAX (per file, default 6000 chars),
+# LEX_SKILL_TOTAL (sum over all skills, default 40000). Non-numbers fall back
+# to the default.
+# ---------------------------------------------------------------------------
+_skills_int() { # $1 = value, $2 = default — only numbers count
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf '%s' "$2"
+}
+
+# Value from the YAML frontmatter (line "<field>: <value>").
+# Frontmatter only when the FIRST line is "---" and somewhere a closing "---"
+# follows — otherwise the whole file counts as content.
+_skills_field() { # $1 = file, $2 = field name
+  awk -v key="$2" '
+    { L[NR] = $0 }
+    END {
+      n = NR
+      fm = (n >= 1 && L[1] == "---")
+      cend = -1
+      if (fm) { for (i = 2; i <= n; i++) if (L[i] == "---") { cend = i; break } }
+      if (fm && cend < 2) fm = 0
+      if (!fm) exit
+      for (i = 2; i < cend; i++) {
+        if (index(L[i], key ":") == 1) {
+          v = substr(L[i], length(key) + 2)
+          gsub(/^[ \t]+|[ \t]+$/, "", v)
+          print v
+          exit
+        }
+      }
+    }' "$1" 2>/dev/null
+}
+
+# BODY of the SKILL.md WITHOUT frontmatter (open frontmatter -> whole file).
+_skills_body() { # $1 = file
+  awk '
+    { L[NR] = $0 }
+    END {
+      n = NR
+      fm = (n >= 1 && L[1] == "---")
+      cend = -1
+      if (fm) { for (i = 2; i <= n; i++) if (L[i] == "---") { cend = i; break } }
+      start = (fm && cend > 0) ? cend + 1 : 1
+      for (i = start; i <= n; i++) print L[i]
+    }' "$1" 2>/dev/null
+}
+
+# Output: all or nothing (empty when no skill was found).
+_skills_ex() {
+  local dir="${_lex_home}/skills" d f name desc body out="" used=0 cnt=0
+  local per tot
+  [[ "${LEX_SKILLS:-on}" == "off" ]] && return 0
+  [[ -d "$dir" ]] || return 0
+  per="$(_skills_int "${LEX_SKILL_MAX:-}" 6000)"
+  tot="$(_skills_int "${LEX_SKILL_TOTAL:-}" 40000)"
+  for d in "$dir"/*/; do
+    [[ -d "$d" ]] || continue
+    f="${d}SKILL.md"
+    [[ -f "$f" && -r "$f" ]] || continue
+    name="$(_skills_field "$f" name)"
+    [[ -n "$name" ]] || name="$(basename "$d")"
+    desc="$(_skills_field "$f" description)"
+    body="$(_skills_body "$f")"
+    # Without a description use the first non-empty line as teaser (max 120).
+    if [[ -z "$desc" ]]; then
+      desc="$(printf '%s' "$body" | awk 'NF { print; exit }')"
+      desc="${desc:0:120}"
+    fi
+    if (( ${#body} > per )); then
+      body="${body:0:per}"$'\n'"… (truncated — full text at ${f})"
+    fi
+    if (( used + ${#body} > tot )); then
+      out+=$'\n'"… (${cnt} skills shown, further ones omitted — LEX_SKILL_TOTAL reached)"$'\n'
+      break
+    fi
+    out+=$'\n'"## ${name} — ${desc}"$'\n'"${body}"$'\n'"(skill file: ${f})"$'\n'
+    used=$(( used + ${#body} + ${#name} + ${#desc} + 96 ))
+    cnt=$(( cnt + 1 ))
+  done
+  # also output when the budget stop hit on the VERY FIRST skill
+  # (cnt = 0, hint line set anyway) — otherwise the block stays silent.
+  [[ -n "$out" ]] || return 0
+  printf '\n\n# — Skills (auto-injected from %s) —\nThese instructions apply by themselves; the complete version always lies at the stated path.%s' "$dir" "$out"
+}
+
 setup_messages() {
   session_init
   # O2 (step 17, 2026-09-29): wiki state always in context — index.md and
@@ -848,7 +975,9 @@ setup_messages() {
   # System prompt + wiki also via a file: no 128-KB argument,
   # no truncation (before 100 000 bytes → wiki state was cut off).
   local sys stf rc
-  sys="${_system_prompt}$(_wiki_ex)"
+  # 5/6: skills BEFORE the wiki state — instructions belong at the prompt end,
+  # the wiki excerpt stands behind them as a reference.
+  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)"
   stf="$(mktemp)" || { log "setup_messages: cannot create temp file"; return 1; }
   if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then rm -f "$stf"; return 1; fi
   _messages="$(jq -c -n --rawfile c "$stf" '[{role:"system",content:$c}]')"
@@ -868,9 +997,14 @@ setup_messages() {
 # ---------------------------------------------------------------------------
 _build_tools() {
   # Compaction (step 42): the summary request runs WITHOUT tools —
-  # saves the 17 schemas in the body and prevents tool answers.
+  # saves the 18 schemas in the body and prevents tool answers.
   [[ -n "${_tools_off:-}" ]] && { printf '[]'; return 0; }
-  jq -n '[
+  # MCP native (round 4/6): cached discovery entries append themselves to the
+  # schema — LEX_MCP=0 or an empty cache yields exactly the previous 18.
+  local native=""
+  native="$(_mcp_cache_entries 2>/dev/null)" || native=""
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "$native"; then native="[]"; fi
+  jq -n --argjson native "$native" '[
     {type:"function",function:{name:"read_file",description:"Reads a file and returns its contents.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"}},required:["path"]}}},
     {type:"function",function:{name:"write_file",description:"Writes a file (overwrites an existing one).",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"},content:{type:"string",description:"File contents"}},required:["path","content"]}}},
     {type:"function",function:{name:"edit_file",description:"Replaces the first occurrence of a text block; with all:true it replaces every occurrence.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"},old:{type:"string",description:"Old text block"},new:{type:"string",description:"New text block"},all:{type:"boolean",description:"Replace every occurrence (default false)"}},required:["path","old","new"]}}},
@@ -887,8 +1021,10 @@ _build_tools() {
     {type:"function",function:{name:"web_fetch",description:"Pulls a known URL as plain text via a crawler (MCP), WITHOUT saving it. For lasting sources use fetch(url, topic).",parameters:{type:"object",properties:{url:{type:"string",description:"http(s) address of the page"},max_length:{type:"integer",description:"Maximum length in characters (default 8000, at most 50000)"}},required:["url"]}}},
     {type:"function",function:{name:"context7",description:"Current documentation for libraries and frameworks (context7) — the counterweight to stale model knowledge.",parameters:{type:"object",properties:{query:{type:"string",description:"Question for the docs, e.g. curl retries"},library:{type:"string",description:"Optional library, e.g. react or bash"}},required:["query"]}}},
     {type:"function",function:{name:"browser",description:"Drives a real browser (Playwright-MCP, system Chrome): navigate → snapshot (ARIA refs) → click/type by ref. Full control, no screenshot needed — the snapshot is text.",parameters:{type:"object",properties:{action:{type:"string",enum:["navigate","snapshot","click","type","press","back","tabs","close","wait"],description:"navigate=url | snapshot=page picture as refs | click/type=ref from snapshot | press=key | back | tabs (index?) | close | wait (text=seconds until the page has loaded)"},url:{type:"string",description:"Target URL (action=navigate)"},ref:{type:"string",description:"Element ref from the snapshot (click/type) — take a fresh snapshot after navigation first"},element:{type:"string",description:"Short description of the target element (for click/type, e.g. submit button)"},text:{type:"string",description:"Input text (action=type) | seconds (action=wait)"},key:{type:"string",description:"Key or combination (action=press, e.g. Enter, Tab, Control+a)"},index:{type:"integer",description:"Tab number (action=tabs, without index = tab list)"}},required:["action"]}}},
-    {type:"function",function:{name:"mcp",description:"Generic MCP access: calls tools of any configured server (defuddle, context7, playwright, desktop, postgres + everything from mcp.json). FIRST tool empty or __tools to fetch the tool list, THEN call tool+arguments.",parameters:{type:"object",properties:{server:{type:"string",description:"Server name, e.g. playwright or defuddle"},tool:{type:"string",description:"Tool name of the server, or __tools / empty for the discovery list"},arguments:{type:"object",description:"Arguments as a JSON object, e.g. {\"url\":\"https://example.com\"}"}},required:["server"]}}}
-  ]'
+    {type:"function",function:{name:"mcp",description:"Generic MCP access: calls tools of any configured server (defuddle, context7, playwright, desktop, postgres + everything from mcp.json). FIRST tool empty or __tools to fetch the tool list, THEN call tool+arguments. tool=__refresh rebuilds the discovery cache (~/.lex/mcp.cache.json) for ALL servers; the direct entries mcp__Server__Tool come from it.",parameters:{type:"object",properties:{server:{type:"string",description:"Server name, e.g. playwright or defuddle"},tool:{type:"string",description:"Tool name of the server, or __tools / empty for the discovery list"},arguments:{type:"object",description:"Arguments as a JSON object, e.g. {\"url\":\"https://example.com\"}"}},required:["server"]}}},
+    {type:"function",function:{name:"agent",description:"Sub-agent with its own, fresh context: offload longer exploration, planning, review or summarization instead of filling the main context. Returns only the result.",parameters:{type:"object",properties:{task:{type:"string",description:"Task of the sub-agent (concrete, with target paths)"},mode:{type:"string",enum:["explore","plan","review","summarize"],description:"explore=explore and report (change nothing), plan=work out a plan, review=check and name findings, summarize=summarize"}},required:["task"]}}}
+    ,{type:"function",function:{name:"task",description:"Background task: starts a command detached (own session) and keeps an eye on it — for long or recurring work that keeps running while you work on something else. Output and result remain available after lex ends.",parameters:{type:"object",properties:{action:{type:"string",enum:["start","list","status","result","kill"],description:"start = start a command in the background, list = all tasks, status = individual status, result = fetch output, kill = stop"},command:{type:"string",description:"Shell command (with action start)"},id:{type:"string",description:"Task id like t1 (with status/result/kill)"},name:{type:"string",description:"Short name for the list (with action start)"},tail:{type:"integer",description:"Number of output lines (with result, default 200)"}},required:["action"]}}}
+  ] + $native'
 }
 
 # ---------------------------------------------------------------------------
@@ -984,8 +1120,16 @@ call_api() {
   # Mock: file-based sequence (for tests)
   if [[ -n "${_mock_file:-}" && -f "${_mock_file}" ]]; then
     local line
+    # O3 (audit 2026-10-08): lock read-modify-write — two runs with the same
+    # LEX_MOCK_FILE both read `head -n1` (the same answer) and wrote into the
+    # same `.tmp` (half-mixed state). Helper historically `_lurk_pending_*`
+    # (N1, §7/78), effect general: fd in the CURRENT process (no $(…)
+    # subshell); without flock available the code continues without a lock —
+    # exactly the behaviour as before.
+    _lurk_pending_lock "${_mock_file}"
     line="$(head -n1 "${_mock_file}" 2>/dev/null)"
     tail -n +2 "${_mock_file}" > "${_mock_file}.tmp" 2>/dev/null && mv "${_mock_file}.tmp" "${_mock_file}"
+    _lurk_pending_unlock
     if [[ -z "${line:-}" ]]; then
       echo '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
       return 0
@@ -1166,7 +1310,19 @@ tool_read_file() {
 tool_write_file() {
   local path="$1" content="$2"
   local resolved dir tmp mode
+  # Audit H2 (2026-10-08): "" reached the CWD via safe_path — the tmp-MV
+  # pushed the temp file as .lex-write.* into the directory, and the path
+  # itself is a directory that mv pushed the file into. Both still reported
+  # "written".
+  if [[ -z "$path" ]]; then
+    echo "Error: empty path."
+    return 1
+  fi
   resolved="$(safe_path "$path")" || return 1
+  if [[ -d "$resolved" ]]; then
+    echo "Error: '$resolved' is a directory."
+    return 1
+  fi
   # §6 #37: the wiki is documentation/log for humans — nothing secret belongs
   # there, even if the model context still needs it. Configs, scripts and
   # everything outside $_wiki_dir stays exactly as the model wrote it
@@ -1701,7 +1857,16 @@ tool_list_files() {
 tool_append_file() {
   local path="$1" content="$2"
   local resolved dir
+  # Audit H2 (2026-10-08): same path class as tool_write_file.
+  if [[ -z "$path" ]]; then
+    echo "Error: empty path."
+    return 1
+  fi
   resolved="$(safe_path "$path")" || return 1
+  if [[ -d "$resolved" ]]; then
+    echo "Error: '$resolved' is a directory."
+    return 1
+  fi
   # §6 #37: the wiki is documentation/log for humans — nothing secret belongs
   # there, even if the model context still needs it. Configs, scripts and
   # everything outside $_wiki_dir stays exactly as the model wrote it
@@ -2116,11 +2281,11 @@ tool_fetch() {
 
   printf 'Raw file: %s\n' "$target"
   printf 'Format: %s · Type: %s · Bytes: %s · Title: %s\n' "$fmt" "${ct:-unknown}" "$size" "$title"
-  printf 'Beginning:\n%.1500s\n' "$body"
+  printf 'Beginning:\n%s\n' "${body:0:1500}"
 }
 
 # ---------------------------------------------------------------------------
-# Memory (Spec §6.4): Markdown + YAML-Frontmatter in ~/.lex/mem/
+# Memory (Spec §6.4): Markdown + YAML frontmatter under ~/.lex/mem/
 # ---------------------------------------------------------------------------
 _mem_valid_type() {
   case "$1" in memory|fact|preference|note) return 0 ;; esac
@@ -2160,6 +2325,162 @@ _mcp_argv() {
   _mcp_config | jq -ce --arg n "$1" '.[$n] | select(.command != null) | [.command] + (.args // [])' 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# MCP native (round 4/6, 2026-10-08): discovery cache + schema entries.
+#
+# `mcp(server, tool, ...)` stays the generic way. NEW: every discovered server
+# tool gets its own schema entry from the cache, `mcp__<server>__<tool>` with
+# the server's inputSchema — the model calls it directly, without fetching the
+# discovery list first. Cache: ${LEX_HOME}/mcp.cache.json, written atomically,
+# with the argv configuration per server. If mcp.json changes, the entries of
+# that server drop out automatically at the next schema build (no restart
+# needed). Only what came via discovery (__tools/__refresh) lands NEW in the
+# cache — lex NEVER starts servers on its own (npx/browser would be startup
+# cost per run).
+# ---------------------------------------------------------------------------
+_mcp_cache_file() {
+  printf '%s\n' "${LEX_HOME:-$HOME/.lex}/mcp.cache.json"
+}
+
+# Cache as JSON — missing or broken -> empty skeleton (always valid).
+_mcp_cache_json() {
+  local f
+  f="$(_mcp_cache_file)"
+  if [[ -f "$f" ]] && jq -e 'type == "object"' "$f" >/dev/null 2>&1; then
+    cat "$f"
+  else
+    printf '{"updated":"","servers":{}}'
+  fi
+}
+
+# Schema entries from the cache — empty with LEX_MCP=0 or empty cache.
+# Only servers whose stored argv configuration still stands EXACTLY so in
+# mcp.json; everything else counts as stale and drops out.
+_mcp_cache_entries() {
+  local cache servers s argv acc="{}"
+  [[ "${LEX_MCP:-1}" == "0" ]] && { printf '[]'; return 0; }
+  cache="$(_mcp_cache_json)"
+  servers="$(jq -r '.servers // {} | keys | .[]' <<< "$cache" 2>/dev/null)" || servers=""
+  [[ -n "$servers" ]] || { printf '[]'; return 0; }
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    argv="$(_mcp_argv "$s" 2>/dev/null)" || argv=""
+    acc="$(jq -cn --argjson a "$acc" --arg k "$s" --arg v "$argv" '$a + {$k:$v}')" || return 1
+  done <<< "$servers"
+  jq -c --argjson cur "$acc" '
+    [ ((.servers // {}) | to_entries[])
+      | select(((.value.argv // "") | length) > 0)
+      | select((.value.argv // "") == ($cur[.key] // " "))
+      | .key as $srv
+      | ((.value.tools // [])[])
+      | ((("mcp__" + $srv + "__" + (.name // ""))) as $full
+         | select($full | test("^[A-Za-z0-9_-]{1,64}$"))
+         | {type:"function",function:{
+             name:$full,
+             description:("[MCP " + $srv + "] " + (.description // "MCP tool without a description")),
+             parameters: ((.inputSchema // {})
+               | if (.type == "object" and ((.properties // {}) | type) == "object")
+                 then .
+                 else {type:"object",properties:{arguments:{type:"object",description:"Arguments as a JSON object"}}} end)}})
+    ]' <<< "$cache"
+}
+
+# Hold the discovery result (JSON array name/description/inputSchema) in the
+# cache — atomically (tmp + mv), a broken cache never replaces a valid one.
+_mcp_cache_merge() { # $1 = server, $2 = tools JSON array
+  local server="$1" tools="$2" f tmp argv cur now
+  [[ -n "$server" ]] || return 1
+  jq -e 'type == "array"' >/dev/null 2>&1 <<< "$tools" || return 1
+  argv="$(_mcp_argv "$server" 2>/dev/null)" || argv=""
+  [[ -n "$argv" ]] || return 1
+  now="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  f="$(_mcp_cache_file)"
+  cur="$(_mcp_cache_json)"
+  tmp="${f}.tmp.$$"
+  jq -cn --argjson base "$cur" --arg s "$server" --arg a "$argv" \
+       --argjson t "$tools" --arg ts "$now" \
+    '$base + {updated:$ts, servers: (($base.servers // {}) + {$s:{argv:$a,tools:$t,updated:$ts}})}' \
+    > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# Rediscover ALL configured servers -> cache (mcp tool: __refresh).
+_mcp_discover_all() {
+  local s out n ok=0 fail=0 total=0 names=""
+  if [[ "${LEX_MCP:-1}" == "0" ]]; then
+    echo "MCP is disabled (LEX_MCP=0)." >&2
+    return 1
+  fi
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    out=""
+    if _mcp_out_var out "$s" "" "{}" listjson \
+       && jq -e 'type == "array"' >/dev/null 2>&1 <<< "$out" \
+       && _mcp_cache_merge "$s" "$out"; then
+      n="$(jq 'length' <<< "$out" 2>/dev/null)" || n=0
+      [[ "$n" =~ ^[0-9]+$ ]] || n=0
+      ok=$(( ok + 1 )); total=$(( total + n ))
+      names+=" ${s}(${n})"
+    else
+      fail=$(( fail + 1 )); names+=" ${s}(error)"
+    fi
+  done < <(jq -r 'keys[]' <<< "$(_mcp_config)" 2>/dev/null)
+  printf 'mcp: discovery cache updated — %d servers discovered, %d errors, %d tools:%s\n' \
+    "$ok" "$fail" "$total" "$names"
+  printf 'Cache: %s (the next schema build appends them as mcp__Server__Tool)\n' "$(_mcp_cache_file)"
+  (( ok > 0 ))
+}
+
+# Split name mcp__<server>__<tool> -> _ns_server/_ns_tool.
+# Longest server id first so that "a__b" does not land before "a".
+_mcp_split_native() { # rc1 = no entry in the cache
+  local name="$1" keys k
+  _ns_server=""; _ns_tool=""
+  keys="$(_mcp_cache_json | jq -r '.servers // {} | keys | sort_by(-length) | .[]' 2>/dev/null)" || keys=""
+  while IFS= read -r k; do
+    [[ -n "$k" ]] || continue
+    if [[ "$name" == "mcp__${k}__"* ]]; then
+      _ns_server="$k"
+      _ns_tool="${name#mcp__${k}__}"
+      [[ -n "$_ns_tool" ]] && return 0
+    fi
+  done <<< "$keys"
+  return 1
+}
+
+# Direct call of a cached server tool (schema entry mcp__...).
+tool_mcp_native() {
+  local name="$1" args="${2:-}" out
+  if ! _mcp_split_native "$name"; then
+    echo "mcp-native: '$name' is not in the discovery cache ($(_mcp_cache_file)) — discover with mcp(server, \"__tools\") or rebuild via mcp(server, \"__refresh\")." >&2
+    return 1
+  fi
+  [[ -z "$args" || "$args" == "null" ]] && args="{}"
+  if ! jq -e 'type == "object"' >/dev/null 2>&1 <<< "$args"; then
+    echo "mcp-native: arguments are not a JSON object: ${args:0:120}" >&2
+    return 1
+  fi
+  _mcp_out_var out "$_ns_server" "$_ns_tool" "$args" || return $?
+  printf '%s\n' "$out"
+}
+
+# Prompt addendum (4/6): the fixed list of 18 above stays untouched, the
+# cached MCP entries are only appended to the ANNOUNCEMENT.
+_mcp_native_note() {
+  local n
+  n="$(_mcp_cache_entries 2>/dev/null | jq 'length' 2>/dev/null)" || n=0
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  (( n > 0 )) || return 0
+  printf '\nPlus %s MCP tools from the discovery cache (%s): their own entries mcp__Server__Tool with the server parameters — call directly. Without an entry keep using mcp(server, tool, arguments); tool __tools shows the list, __refresh rebuilds the cache.\n' \
+    "$n" "$(_mcp_cache_file)"
+}
+
+# Pull the prompt state along here: _system_prompt/_system_prompt_default are
+# set from line ~688 on, but the cache functions only exist from here.
+_system_prompt="${_system_prompt}$(_mcp_native_note)"
+_system_prompt_default="$_system_prompt"
+
 # Last error line of the server (for messages), otherwise empty.
 _mcp_errline() {
   local l
@@ -2189,10 +2510,26 @@ _mcp_wait() {
 }
 
 # Close the session (release FDs and process).
+# Finding 2026-10-08 (hygiene refill M12): without `exec` MCPSRV_PID was only
+# the coproc **intermediate process** — `kill` hit it, the actual server
+# process was orphaned and kept running (Repro: fake_mcp `hang` -> 30-s sleep,
+# visible as a leak in CI). Also: children first (browser/worker processes),
+# TERM with a limited wait, then KILL — a server that ignores TERM could
+# otherwise make `_mcp_close` hang on `wait`.
 _mcp_close() {
-  if [[ -n "${MCPSRV_PID:-}" ]]; then
-    kill "$MCPSRV_PID" 2>/dev/null
-    wait "$MCPSRV_PID" 2>/dev/null
+  local pid="${MCPSRV_PID:-}" i
+  if [[ -n "$pid" ]]; then
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+    for (( i = 0; i < 5; i++ )); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill -KILL -P "$pid" 2>/dev/null || true
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null
   fi
   MCPSRV_KEY=""
 }
@@ -2218,7 +2555,7 @@ _mcp_send() {
 _mcp_call() {
   local server="$1" tool="$2" args="${3:-}" mode="${4:-call}" argv wrc=0
   local label="$tool"
-  [[ "$mode" == "list" ]] && label="tools/list"
+  [[ "$mode" == "list" || "$mode" == "listjson" ]] && label="tools/list"
   [[ -z "$args" ]] && args="{}"
   if [[ "${LEX_MCP:-1}" == "0" ]]; then
     echo "MCP is disabled (LEX_MCP=0)." >&2
@@ -2265,7 +2602,10 @@ _mcp_call() {
     :
   else
     _mcp_close
-    coproc MCPSRV { "${mcp_cmd[@]}" 2>"$errfile"; }
+    # `exec` is mandatory (finding 2026-10-08): otherwise the server runs as a
+    # CHILD of the coproc intermediate process — _mcp_close only killed the
+    # wrapper and the server kept running as an orphan.
+    coproc MCPSRV { exec "${mcp_cmd[@]}" 2>"$errfile"; }
     MCPSRV_KEY="$server|$argv"
     MCPSRV_NEXTID=1
 
@@ -2300,7 +2640,7 @@ _mcp_call() {
   # with the next request.
   rid=$(( ${MCPSRV_NEXTID:-1} + 1 )); MCPSRV_NEXTID=$rid
 
-  if [[ "$mode" == "list" ]]; then
+  if [[ "$mode" == "list" || "$mode" == "listjson" ]]; then
     line="$(jq -cn --argjson i "$rid" '{jsonrpc:"2.0",id:$i,method:"tools/list",params:{}}')" || {
       _mcp_close; echo "MCP '$server': tools/list step failed." >&2; return 1
     }
@@ -2330,6 +2670,12 @@ _mcp_call() {
     echo "MCP '$server': $(jq -r '.error.message // "unknown error"' <<< "$resp")" >&2
     _mcp_close
     return 1
+  fi
+  if [[ "$mode" == "listjson" ]]; then
+    # Round 4/6: discovery as JSON (name/description/inputSchema) — the
+    # cache needs the schemas, the human still gets them as text.
+    jq -c '.result.tools // []' <<< "$resp" 2>/dev/null || printf '[]\n'
+    return 0
   fi
   if [[ "$mode" == "list" ]]; then
     text="$(jq -r '[.result.tools[]? | "\(.name) — \(.description // "no description")"] | join("\n")' <<< "$resp" 2>/dev/null)"
@@ -2542,19 +2888,32 @@ tool_browser() {
 # discovery first (tool empty or __tools → tools/list), then tools/call.
 # Turns every new mcp.json entry into a model tool — no code per server.
 tool_mcp() {
-  local server="${1:-}" tool="${2:-}" args="${3:-}" out names len
+  local server="${1:-}" tool="${2:-}" args="${3:-}" out names len text
   if [[ -z "$server" ]]; then
     names="$(_mcp_config | jq -r 'keys | join(", ")' 2>/dev/null)" || names=""
     echo "mcp: server missing. Configured servers: ${names:-unknown} — or add one to ${LEX_HOME:-$HOME/.lex}/mcp.json." >&2
     return 1
   fi
+  # __refresh (4/6): rediscover ALL configured servers -> cache.
+  if [[ "$tool" == "__refresh" ]]; then
+    _mcp_discover_all
+    return $?
+  fi
   if [[ -z "$tool" || "$tool" == "__tools" ]]; then
-    _mcp_out_var out "$server" "" "{}" list || return $?
+    _mcp_out_var out "$server" "" "{}" listjson || return $?
     if [[ -z "$out" ]]; then
       echo "mcp: server '$server' reports no tools." >&2
       return 1
     fi
-    printf 'Tools from %s (name — description):\n%s\n' "$server" "$out"
+    # Discovery writes the cache (4/6): from now on every entry has its own
+    # schema entry mcp__<server>__<tool>.
+    _mcp_cache_merge "$server" "$out" || true
+    text="$(jq -r '[.[] | "\(.name) — \(.description // "no description")"] | join("\n")' <<< "$out" 2>/dev/null)"
+    if [[ -z "$text" ]]; then
+      echo "mcp: server '$server' reports no tools." >&2
+      return 1
+    fi
+    printf 'Tools from %s (name — description):\n%s\n' "$server" "$text"
     return 0
   fi
   [[ -z "$args" ]] && args="{}"
@@ -2718,17 +3077,450 @@ tool_mem_search() {
   printf '%s\n' "$out"
 }
 
+# Hooks (round 1/6 of the extensibility series 2026-10-08): executable files
+# in ${_lex_home}/hooks/pre_tool/ and ${_lex_home}/hooks/post_tool/
+# (alphabetical order, e.g. 10-guard, 20-audit).
+# Env per run: LEX_HOOK_EVENT, LEX_HOOK_TOOL, LEX_HOOK_ARGS (JSON),
+# LEX_HOOK_RC (post only). pre_tool: rc != 0 BLOCKS the tool call and the
+# hook output becomes the tool result — timeouts/errors count as blocking
+# (fail-closed: a broken guard prevents instead of quietly slipping through).
+# LEX_HOOKS=off switches all hooks off, LEX_HOOK_TIMEOUT (default 5s) caps.
+_run_hooks() { # $1=event $2=tool $3=args [$4=rc] -> rc0 = continue, rc1 = blocked
+  local event="$1" tool="$2" args="${3:-}" hrc="${4:-}"
+  local dir="${_lex_home}/hooks/${event}" f brc hto
+  _hook_msg=""
+  [[ "${LEX_HOOKS:-on}" == "off" ]] && return 0
+  [[ -d "$dir" ]] || return 0
+  hto="${LEX_HOOK_TIMEOUT:-5}"
+  [[ "$hto" =~ ^[0-9]+$ ]] || hto=5
+  export LEX_HOOK_EVENT="$event" LEX_HOOK_TOOL="$tool" LEX_HOOK_ARGS="$args" LEX_HOOK_RC="$hrc"
+  for f in "$dir"/*; do
+    [[ -f "$f" && -x "$f" ]] || continue
+    _run_limited "$hto" "$f"
+    brc=$?
+    log "hook: ${event} ${f##*/} rc=${brc}"
+    if (( brc != 0 )) && [[ "$event" == "pre_tool" ]]; then
+      _hook_msg="Tool '$tool' blocked by hook '${f##*/}' (rc=$brc)."
+      [[ -n "${_rl_out:-}" ]] && _hook_msg+=$'\n'"$_rl_out"
+      unset LEX_HOOK_EVENT LEX_HOOK_TOOL LEX_HOOK_ARGS LEX_HOOK_RC
+      return 1
+    fi
+  done
+  unset LEX_HOOK_EVENT LEX_HOOK_TOOL LEX_HOOK_ARGS LEX_HOOK_RC
+  return 0
+}
+
+_agent_sysprompt() { # $1 = mode -> sub-agent system prompt (rc 1 on unknown mode)
+  local mode="$1"
+  local base='You are a sub-agent of lex. You work in your own, fresh context with lex tools (read_file, search, bash, fetch, web_search, ...) — only NOT in the main agent. Rules: English; never guess (use tools, then substantiate); at the end EXACTLY ONE text answer (NO tool call) — it goes back unchanged to the main agent; compact, with file paths/sources as evidence.'
+  case "$mode" in
+    explore)   printf '%s\n\nMode: EXPLORE. Thoroughly explore the task area (files, search, web/context7 if needed). CHANGE NOTHING, write nothing. Result: a structured finding — what was found (paths, hits) and what is NOT there.' "$base" ;;
+    plan)      printf '%s\n\nMode: PLAN. Work out a concrete step-by-step plan with order and risks. Plan only, execute nothing. Result: a numbered plan list.' "$base" ;;
+    review)    printf '%s\n\nMode: REVIEW. Critically check what is named: errors, gaps, security. Evidence before assessment — first finding with path/line, then severity. Result: a findings list, then an overall verdict in one sentence.' "$base" ;;
+    summarize) printf '%s\n\nMode: SUMMARIZE. Briefly summarize the context/task (max. 10 lines), without inventing new facts.' "$base" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Sub-agent (round 2/6 of the extensibility series 2026-10-08): agent(task, mode)
+# — own fresh context, own system prompt, own tool loop. The main context stays
+# untouched because _messages is LOCAL inside tool_agent (bash dynamic scope):
+# everything called from here (call_api, append_message_json, dispatch_tool)
+# works on THIS local variable; after return the main context is byte-identical
+# again. No sub-sub-agent (depth gate), LEX_AGENT_MAX_TURNS (default 15) caps
+# the run, Ctrl+C aborts (_turn_aborted from run_turn, globally visible).
+tool_agent() {
+  local task="${1:-}" mode="${2:-explore}" sys stf rc
+  if [[ -z "$task" ]]; then
+    echo "agent: task missing — describe the sub-agent's task." >&2
+    return 1
+  fi
+  case "$mode" in
+    explore|plan|review|summarize) ;;
+    *)
+      echo "agent: unknown mode '$mode' (explore|plan|review|summarize)." >&2
+      return 1
+      ;;
+  esac
+  # Gate BEFORE the local: reads the CALLER's value (1 = we are ourselves
+  # already a sub-agent -> no second level).
+  if (( ${_agent_depth:-0} >= 1 )); then
+    echo "agent: no sub-sub-agents — carry out the task yourself." >&2
+    return 1
+  fi
+  local _agent_depth=1
+  local _messages _turn_count=0
+  sys="$(_agent_sysprompt "$mode")" || {
+    echo "agent: system prompt for mode '$mode' not buildable." >&2
+    return 1
+  }
+  stf="$(mktemp 2>/dev/null)" || { echo "agent: cannot create temp file." >&2; return 1; }
+  if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then
+    rm -f "$stf"; echo "agent: temp file not writable." >&2; return 1
+  fi
+  _messages="$(jq -cn --rawfile s "$stf" --arg t "$task" \
+    '[{role:"system",content:$s},{role:"user",content:$t}]')"; rc=$?
+  rm -f "$stf"
+  if (( rc != 0 )) || [[ -z "$_messages" ]]; then
+    echo "agent: context could not be built." >&2
+    return 1
+  fi
+  log "agent: start mode=$mode task=${#task} chars"
+  _agent_loop
+  rc=$?
+  log "agent: end rc=$rc"
+  return "$rc"
+}
+
+# The sub-agent's loop (see tool_agent). Per turn: build the assistant entry
+# (via files like run_turn — no 128-KB shell arguments), then dispatch the
+# tool calls WITHOUT command substitution (otherwise dispatch_tool's MCP
+# session is lost), truncation/spill as in run_turn. No render_markdown: the
+# result is tool output, not terminal output; also no nudges — on emptiness or
+# turn limit the sub-agent aborts hard.
+_agent_loop() {
+  local turns=0 max response content reasoning tc_json tc_count i tc name args tci
+  local result dt rc rlen spill assistant_msg amtf ttf
+  max="${LEX_AGENT_MAX_TURNS:-15}"
+  [[ "$max" =~ ^[0-9]+$ ]] || max=15
+  while :; do
+    turns=$((turns + 1))
+    if (( turns > max )); then
+      echo "agent: turn limit reached ($max) — sub-agent aborted." >&2
+      return 1
+    fi
+    if [[ -n "${_turn_aborted:-}" ]]; then
+      echo "agent: aborted (Ctrl+C)." >&2
+      return 130
+    fi
+    response="$(call_api)" || { echo "agent: API call failed." >&2; return 1; }
+    content="$(jq -r '.choices[0].message.content // empty' <<< "$response" 2>/dev/null)"
+    reasoning="$(jq -r '.choices[0].message.reasoning_content // empty' <<< "$response" 2>/dev/null)"
+    tc_json="$(jq -c '.choices[0].message.tool_calls // []' <<< "$response" 2>/dev/null)"
+    tc_count="$(jq 'length' <<< "$tc_json" 2>/dev/null || echo 0)"
+    [[ "$tc_count" =~ ^[0-9]+$ ]] || tc_count=0
+    amtf="$(mktemp 2>/dev/null)" && ttf="$(mktemp 2>/dev/null)" || {
+      rm -f "${amtf:-}" "${ttf:-}"; echo "agent: cannot create temp files." >&2; return 1; }
+    printf '%s' "$content" > "$amtf" 2>/dev/null && printf '%s' "$tc_json" > "$ttf" 2>/dev/null || {
+      rm -f "$amtf" "$ttf"; echo "agent: temp files not writable." >&2; return 1; }
+    assistant_msg="$(jq -n --rawfile c "$amtf" --slurpfile t "$ttf" \
+      '{role:"assistant",content:$c,tool_calls:($t[0] // [])}')"
+    rc=$?
+    rm -f "$amtf" "$ttf"
+    if (( rc != 0 )) || [[ -z "$assistant_msg" ]]; then
+      echo "agent: assistant entry not buildable." >&2
+      return 1
+    fi
+    (( tc_count == 0 )) && assistant_msg="$(jq 'del(.tool_calls)' <<< "$assistant_msg")"
+    append_message_json "$assistant_msg" "$reasoning" || {
+      echo "agent: context append failed." >&2; return 1; }
+    if (( tc_count == 0 )); then
+      if [[ -z "$content" ]]; then
+        echo "agent: empty answer without tool call." >&2
+        return 1
+      fi
+      printf '%s' "$content"
+      return 0
+    fi
+    for (( i = 0; i < tc_count; i++ )); do
+      tc="$(jq ".[$i]" <<< "$tc_json" 2>/dev/null)"
+      name="$(jq -r '.function.name // empty' <<< "$tc" 2>/dev/null)"
+      args="$(jq -r '.function.arguments // empty' <<< "$tc" 2>/dev/null)"
+      tci="$(jq -r '.id // empty' <<< "$tc" 2>/dev/null)"
+      _trace_line "$name" "$(_hint_args "$args")"
+      dt="$(mktemp 2>/dev/null)"
+      if [[ -n "$dt" ]]; then
+        dispatch_tool "$name" "$args" > "$dt" 2>&1
+        result="$(cat "$dt")"
+        rm -f "$dt"
+      else
+        result="$(dispatch_tool "$name" "$args" 2>&1)"
+      fi
+      # Truncation/spill as in run_turn (central limit _tool_max_output) —
+      # without a nudge chain: the sub-agent gets the path for reloading.
+      if (( ${#result} > ${_tool_max_output:-50000} )); then
+        rlen=${#result}
+        spill="$(_tool_spill "$name" "$result")"
+        if [[ -n "${spill:-}" ]]; then
+          result="${result:0:${_tool_max_output:-50000}}"$'\n... ('"$rlen"' bytes total — full output lies at '"$spill"', reload with read_file)'
+        else
+          result="${result:0:${_tool_max_output:-50000}}"$'\n... (truncated, '"$rlen"' bytes total — storing failed)'
+        fi
+      fi
+      append_tool_message "$tci" "$result"
+    done
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 6/6 background tasks (power round 2026-10-08): task(start/status/result/kill/list)
+#
+# A long command runs detached: own session (setsid if available), output in
+# ${_lex_home}/tasks/<id>/out.log, return value in .../rc — the state stays
+# readable after lex has ended, Ctrl+C in the REPL does not take the tasks
+# with it.
+# Same hurdles as the bash tool (deny list, sudo gate, approve): task must NOT
+# open a bypass path.
+# Gates: LEX_TASK_MAX (running simultaneously, default 5), LEX_TASK_TIMEOUT
+# (seconds per task, default 0 = unlimited, via timeout(1) -> rc 124).
+# ---------------------------------------------------------------------------
+_task_dir() { printf '%s\n' "${_lex_home}/tasks"; }
+
+# Id only t1 … t999 — otherwise an id field would reach into paths.
+_task_id_ok() { [[ "${1:-}" =~ ^t[0-9]{1,3}$ ]]; }
+
+# Directories in numeric order (one glob sorts t10 before t2).
+_task_dirs() {
+  local dir i
+  dir="$(_task_dir)"
+  [[ -d "$dir" ]] || return 0
+  for (( i = 1; i <= 999; i++ )); do
+    [[ -d "$dir/t$i" ]] && printf '%s\n' "$dir/t$i"
+  done
+  return 0
+}
+
+_task_head() { head -n 1 "$1" 2>/dev/null; }
+
+# State: starting | running | rc=N | killed | lost
+_task_state() {
+  local d="$1" pid rc now st age
+  if [[ -f "$d/killed" ]]; then printf 'killed'; return 0; fi
+  if [[ -f "$d/rc" ]]; then
+    rc="$(tr -cd '0-9' < "$d/rc" 2>/dev/null)"
+    printf 'rc=%s' "${rc:-?}"
+    return 0
+  fi
+  pid="$(tr -cd '0-9' < "$d/pid" 2>/dev/null)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    printf 'running'
+    return 0
+  fi
+  # Shortly after the start there is neither pid nor rc — that is no loss.
+  st="$(tr -cd '0-9' < "$d/started" 2>/dev/null)"
+  if [[ "$st" =~ ^[0-9]+$ ]]; then
+    now="$(date +%s)"
+    age=$(( now - st ))
+    if (( age < 5 )); then printf 'starting'; return 0; fi
+  fi
+  printf 'lost'
+}
+
+_task_running_count() {
+  local d n=0
+  while IFS= read -r d; do
+    [[ -d "$d" ]] || continue
+    if [[ "$(_task_state "$d")" == "running" ]]; then n=$(( n + 1 )); fi
+  done < <(_task_dirs)
+  printf '%s' "$n"
+}
+
+_task_start() {
+  local command="$1" name="${2:-}" dir tid d i n max tmo runner body pid started deny
+  if [[ -z "$command" ]]; then
+    echo "task: command missing — start needs a shell command." >&2
+    return 1
+  fi
+  # The same hurdles as tool_bash — task is not a bypass path.
+  deny="$(_bash_denied "$command")"
+  if [[ -n "${deny:-}" ]]; then
+    echo "Refused: ${deny} (deny list)."
+    log "tool: task refused — ${deny}"
+    return 1
+  fi
+  if _needs_sudo "$command"; then
+    if ! _sudo_gate "$command"; then
+      echo "Refused: sudo — ${_sudo_gate_reason}."
+      log "tool: task sudo refused — ${_sudo_gate_reason}"
+      return 1
+    fi
+  elif [[ "${_approve:-0}" == "1" ]] && ! _approve_request "$command"; then
+    echo "Refused: no approval given."
+    return 1
+  fi
+  dir="$(_task_dir)"
+  mkdir -p "$dir" 2>/dev/null || { echo "task: $dir not creatable." >&2; return 1; }
+  max="$(_int_or "${LEX_TASK_MAX:-}" 5)"
+  n="$(_task_running_count)"
+  if (( n >= max )); then
+    echo "task: too many running tasks ($n of $max) — end one with task(action: kill, id: tN) first." >&2
+    return 1
+  fi
+  # Id via mkdir lock: atomic, even across two lex instances.
+  tid=""
+  for (( i = 1; i <= 999; i++ )); do
+    if mkdir "$dir/t$i" 2>/dev/null; then tid="t$i"; break; fi
+  done
+  if [[ -z "$tid" ]]; then
+    echo "task: no free id (t1–t999 all taken)." >&2
+    return 1
+  fi
+  d="$dir/$tid"
+  started="$(date +%s)"
+  printf '%s\n' "$command" > "$d/cmd" 2>/dev/null
+  printf '%s\n' "$started" > "$d/started" 2>/dev/null
+  [[ -n "$name" ]] && printf '%s\n' "$name" > "$d/name" 2>/dev/null
+  # Deadline (optional): timeout(1) yields rc 124 and lands like every other
+  # completion in the rc file.
+  tmo="$(_int_or "${LEX_TASK_TIMEOUT:-}" 0)"
+  runner="bash -c $(printf '%q' "$command")"
+  if (( tmo > 0 )) && command -v timeout >/dev/null 2>&1; then
+    runner="timeout ${tmo} bash -c $(printf '%q' "$command")"
+  fi
+  # Body: write the pid from the VERY process that later also deletes it
+  # (setsid may fork — $! would be the wrapper), then the command, then rc.
+  # That keeps the state readable even if lex has long finished.
+  body="printf '%s\\n' \"\$\$\" > $(printf '%q' "$d/pid"); ${runner} > $(printf '%q' "$d/out.log") 2>&1; printf '%s\\n' \"\$?\" > $(printf '%q' "$d/rc")"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "$body" </dev/null >/dev/null 2>&1 &
+  else
+    nohup bash -c "$body" </dev/null >/dev/null 2>&1 &
+  fi
+  pid=$!
+  jq -cn --arg id "$tid" --arg name "$name" --arg cmd "$command" \
+       --argjson ts "$started" \
+    '{id:$id,name:$name,command:$cmd,started:$ts}' > "$d/meta.json" 2>/dev/null || true
+  log "tool: task start $tid"
+  printf 'Task %s started (own process group)\n' "$tid"
+  [[ -n "$name" ]] && printf 'name   : %s\n' "$name"
+  printf 'command: %s\n' "${command:0:160}"
+  printf 'status : task(action: status, id: %s) · output: task(action: result, id: %s)\n' "$tid" "$tid"
+  return 0
+}
+
+_task_list() {
+  local d id state name cmd started now age out=""
+  if [[ ! -d "$(_task_dir)" ]]; then
+    printf 'No tasks (folder %s missing — task(action: start) creates it).\n' "$(_task_dir)"
+    return 0
+  fi
+  now="$(date +%s)"
+  while IFS= read -r d; do
+    [[ -d "$d" ]] || continue
+    id="$(basename "$d")"
+    state="$(_task_state "$d")"
+    name="$(_task_head "$d/name")"
+    cmd="$(_task_head "$d/cmd")"
+    started="$(tr -cd '0-9' < "$d/started" 2>/dev/null)"
+    [[ "$started" =~ ^[0-9]+$ ]] || started=0
+    age=$(( now - started )); (( age < 0 )) && age=0
+    out+="$(printf '  %-5s %-9s %4ss  %s' "$id" "$state" "$age" "${cmd:0:90}")"$'\n'
+    [[ -n "$name" ]] && out+="$(printf '        name: %s' "$name")"$'\n'
+  done < <(_task_dirs)
+  if [[ -z "$out" ]]; then
+    printf 'No tasks.\n'
+    return 0
+  fi
+  printf 'Tasks in %s (state: starting|running|rc=N|killed|lost):\n%s' "$(_task_dir)" "$out"
+}
+
+_task_status() {
+  local id="$1" d state pid cmd name started now age
+  _task_id_ok "$id" || { echo "task: invalid id '${id}' (expected t1 … t999)." >&2; return 1; }
+  d="$(_task_dir)/$id"
+  [[ -d "$d" ]] || { echo "task: '$id' does not exist — task(action: list) shows all." >&2; return 1; }
+  state="$(_task_state "$d")"
+  cmd="$(_task_head "$d/cmd")"
+  name="$(_task_head "$d/name")"
+  pid="$(tr -cd '0-9' < "$d/pid" 2>/dev/null)"
+  started="$(tr -cd '0-9' < "$d/started" 2>/dev/null)"
+  age=0
+  if [[ "$started" =~ ^[0-9]+$ ]]; then
+    now="$(date +%s)"
+    age=$(( now - started )); (( age < 0 )) && age=0
+  fi
+  printf 'Task %s — %s\n' "$id" "$state"
+  [[ -n "$name" ]] && printf 'name   : %s\n' "$name"
+  printf 'command: %s\n' "$cmd"
+  [[ -n "$pid" ]] && printf 'pid    : %s\n' "$pid"
+  printf 'for    : %ss\n' "$age"
+  printf 'log    : %s\n' "$d/out.log"
+}
+
+_task_result() {
+  local id="$1" tailn="${2:-}" d n state
+  _task_id_ok "$id" || { echo "task: invalid id '${id}' (expected t1 … t999)." >&2; return 1; }
+  d="$(_task_dir)/$id"
+  [[ -d "$d" ]] || { echo "task: '$id' does not exist." >&2; return 1; }
+  n="$(_int_or "$tailn" 200)"
+  (( n > 5000 )) && n=5000
+  (( n < 1 )) && n=1
+  state="$(_task_state "$d")"
+  printf 'Task %s (%s) — last %s lines from %s:\n' "$id" "$state" "$n" "$d/out.log"
+  if [[ ! -s "$d/out.log" ]]; then
+    printf '(no output yet)\n'
+    return 0
+  fi
+  tail -n "$n" "$d/out.log" 2>/dev/null
+  return 0
+}
+
+_task_kill() {
+  local id="$1" d state pid i
+  _task_id_ok "$id" || { echo "task: invalid id '${id}' (expected t1 … t999)." >&2; return 1; }
+  d="$(_task_dir)/$id"
+  [[ -d "$d" ]] || { echo "task: '$id' does not exist." >&2; return 1; }
+  state="$(_task_state "$d")"
+  if [[ "$state" != "running" && "$state" != "starting" ]]; then
+    printf 'Task %s is not running (%s) — nothing to do.\n' "$id" "$state"
+    return 0
+  fi
+  pid="$(tr -cd '0-9' < "$d/pid" 2>/dev/null)"
+  if [[ -n "$pid" ]]; then
+    # Children first (the child chain otherwise holds the port/pipe), then the
+    # body shell — the same order as _mcp_close.
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+    for (( i = 0; i < 10; i++ )); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill -KILL -P "$pid" 2>/dev/null || true
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  : > "$d/killed" 2>/dev/null
+  # rc does not come by itself any more (the body is dead) -> 137 = KILL.
+  [[ -f "$d/rc" ]] || printf '137\n' > "$d/rc" 2>/dev/null
+  log "tool: task kill $id"
+  printf 'Task %s ended (TERM, KILL if needed).\n' "$id"
+}
+
+# task(action, command?, id?, name?, tail?) — tool dispatcher.
+tool_task() {
+  local action="${1:-}" command="${2:-}" id="${3:-}" name="${4:-}" tailn="${5:-}"
+  case "$action" in
+    start)  _task_start "$command" "$name" ;;
+    list)   _task_list ;;
+    status) _task_status "$id" ;;
+    result) _task_result "$id" "$tailn" ;;
+    kill)   _task_kill "$id" ;;
+    *)
+      echo "task: action missing or unknown: '${action}' — start|list|status|result|kill" >&2
+      return 1
+      ;;
+  esac
+}
+
 dispatch_tool() {
+
   local name="$1" args="$2"
   local path content old new command all mtype query pattern recursive glob regex
   local todo_action text todo_index url topic title web_max ctx_lib
   local b_action b_ref b_element b_key b_index
-  local m_server m_tool m_args
+  local m_server m_tool m_args a_task a_mode
+  local t_action t_command t_id t_name t_tail
   # Arguments must be JSON objects — otherwise the jq error message
   # lands in the context as a tool result (P3, 2026-09-28).
   [[ -z "${args:-}" ]] && args="{}"
   if ! jq -e 'type == "object"' >/dev/null 2>&1 <<< "$args"; then
-    echo "Error: tool arguments are not a JSON object: $(printf '%.120s' "$args")"
+    echo "Error: tool arguments are not a JSON object: ${args:0:120}"
+    return 1
+  fi
+  # pre_tool hooks: before the run, rc != 0 stops the tool call.
+  if ! _run_hooks pre_tool "$name" "$args"; then
+    printf '%s\n' "${_hook_msg:-Tool call blocked by hook.}"
     return 1
   fi
   # Span-level log (2026-09-30): the start stamp is taken before the case,
@@ -2823,12 +3615,30 @@ dispatch_tool() {
       b_index="$(jq -r '.index // empty' <<< "$args")"
       tool_browser "$b_action" "$url" "$b_ref" "$b_element" "$text" "$b_key" "$b_index"
       ;;
+    mcp__*)
+      # MCP native (4/6): own schema entry from the discovery cache.
+      tool_mcp_native "$name" "$args"
+      ;;
     mcp)
       m_server="$(jq -r '.server // empty' <<< "$args")"
       m_tool="$(jq -r '.tool // empty' <<< "$args")"
       # arguments tolerant: JSON object (schema) or JSON string (model fallback)
       m_args="$(jq -c 'if (.arguments | type) == "string" then ((.arguments | fromjson?) // {}) else (.arguments // {}) end' <<< "$args")" || m_args='{}'
       tool_mcp "$m_server" "$m_tool" "$m_args"
+      ;;
+    task)
+      # 6/6 background tasks: start|list|status|result|kill
+      t_action="$(jq -r '.action // empty' <<< "$args")"
+      t_command="$(jq -r '.command // empty' <<< "$args")"
+      t_id="$(jq -r '.id // empty' <<< "$args")"
+      t_name="$(jq -r '.name // empty' <<< "$args")"
+      t_tail="$(jq -r '.tail // empty' <<< "$args")"
+      tool_task "$t_action" "$t_command" "$t_id" "$t_name" "$t_tail"
+      ;;
+    agent)
+      a_task="$(jq -r '.task // empty' <<< "$args")"
+      a_mode="$(jq -r '.mode // empty' <<< "$args")"
+      tool_agent "$a_task" "$a_mode"
       ;;
     *)
       echo "Unknown tool: $name"
@@ -2842,6 +3652,8 @@ dispatch_tool() {
   _t1="$(_ms_now)"
   if (( _rc == 0 )); then _ok=true; else _ok=false; fi
   span_log "$name" "$args" $(( _t1 - _t0 )) "$_ok"
+  # post_tool hooks: observe only (output goes to the log, never the result).
+  _run_hooks post_tool "$name" "$args" "$_rc" || true
   return "$_rc"
 }
 
@@ -2906,9 +3718,13 @@ _trace_enabled() {
 # Compact argument hint: first sensible value, single line, 70 characters.
 _hint_args() {
   local args="$1" v
-  v="$(jq -r '[.path // "", .query // "", .command // "", .action // "", .text // "", .url // "", .old // ""] | map(select(length > 0)) | .[0] // ""' <<< "$args" 2>/dev/null)"
+  v="$(jq -r '[.path // "", .query // "", .command // "", .action // "", .text // "", .url // "", .task // "", .old // ""] | map(select(length > 0)) | .[0] // ""' <<< "$args" 2>/dev/null)"
   v="${v//$'\n'/ }"
-  printf '%.70s' "$v"
+  # O2 (audit 2026-10-08): characters instead of bytes — `%.70s` truncated
+  # BYTES and could end in the middle of a multi-byte character (100x€ = 300
+  # B -> before only 23 full chars + 1 half). With a UTF-8 locale ${v:0:N}
+  # counts characters.
+  printf '%s' "${v:0:70}"
 }
 
 # Live feedback (steps A/B, 2026-09-28): spinner, tool result,
@@ -3753,6 +4569,81 @@ _abort_turn_note() {
   echo "Turn aborted (Ctrl+C). REPL stays open — session saved."
 }
 
+# ---------------------------------------------------------------------------
+# 3/6 parallel tool calls (power round 2026-10-08).
+#
+# In run_turn's tool batch EXCLUSIVELY stateless, write-free tools run in
+# parallel in background subshells:
+#   * MCP tools (fetch, web_fetch, context7, browser, mcp) stay serial —
+#     coproc session and MCPSRV_NEXTID live in this shell and do not
+#     survive a subshell (P2, review 2026-09-29).
+#   * agent stays serial (depth gate and local _messages scope).
+#   * bash stays serial (timeout deadline, Ctrl+C interaction mid-run).
+#   * writing tools stay serial (the model expects the order of the
+#     consecutive tool calls).
+#   * web_search stays serial (shared errfile next to the curl run).
+# LEX_PARALLEL=off switches the batch off completely (safety gate).
+_tool_runs_parallel() {
+  [[ "${LEX_PARALLEL:-on}" == "off" ]] && return 1
+  case "$1" in
+    read_file|list_files|search|mem_list|mem_search) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _pp_launch_batch — starts all RUNS (>= 2 consecutive parallel-capable
+# tools) as background subshells. Result per index in a temp file; run_turn
+# collects them in original order.
+# Visible sizes tool_count/tool_calls_json and the targets _pp_pid/_pp_file
+# arrive via the bash scope from the caller (run_turn).
+_pp_launch_batch() {
+  local i=0 j k name args tc _f
+  _pp_pid=()
+  _pp_file=()
+  while (( i < tool_count )); do
+    j="$i"
+    while (( j < tool_count )); do
+      name="$(jq -r ".[$j].function.name // empty" <<< "$tool_calls_json" 2>/dev/null)"
+      _tool_runs_parallel "$name" || break
+      j=$(( j + 1 ))
+    done
+    # Only from two matching tools on the background run pays off — a single
+    # one changes neither order nor duration.
+    if (( j - i < 2 )); then
+      i=$(( i + 1 ))
+      continue
+    fi
+    for (( k=i; k<j; k++ )); do
+      tc="$(jq -c ".[$k]" <<< "$tool_calls_json" 2>/dev/null)" || continue
+      name="$(jq -r '.function.name' <<< "$tc" 2>/dev/null)"
+      args="$(jq -r '.function.arguments // empty' <<< "$tc" 2>/dev/null)"
+      _f="$(mktemp 2>/dev/null)" || continue
+      # Trace at START: the human sees the run, not just the result.
+      _trace_line "$name" "$(_hint_args "$args")"
+      # dispatch_tool INSIDE the subshell — hooks run along there too;
+      # span_log appends its little line per O_APPEND.
+      ( dispatch_tool "$name" "$args" >"$_f" 2>&1 ) &
+      _pp_pid[$k]=$!
+      _pp_file[$k]="$_f"
+    done
+    i="$j"
+  done
+}
+
+# _pp_cleanup — kill remaining background runs, remove temp files
+# (Ctrl+C in the middle of a batch). Empty or never started: no error.
+_pp_cleanup() {
+  local i
+  for i in "${!_pp_pid[@]}"; do
+    [[ -n "${_pp_pid[$i]:-}" ]] || continue
+    kill "${_pp_pid[$i]}" 2>/dev/null
+    wait "${_pp_pid[$i]}" 2>/dev/null
+    rm -f "${_pp_file[$i]:-}"
+    _pp_pid[$i]=""
+    _pp_file[$i]=""
+  done
+}
+
 run_turn() {
   local input="$1" turn_t0 nudge_count=0 rep_nudges=0 pending="" _dtf="" rlen _spill=""
   # Fail memory (step 54, §6 #38): the same tool call three times in a row
@@ -3953,9 +4844,15 @@ run_turn() {
       continue
     fi
     local i tc name args tci result
+    # 3/6 parallel tool calls (2026-10-08): stateless tools start
+    # BEFORE the run in background subshells — collection still happens in
+    # ORIGINAL order, the protocol (assistant -> tool -> ...) stays.
+    local -a _pp_pid=() _pp_file=()
+    _pp_launch_batch
     for (( i=0; i<tool_count; i++ )); do
       # Ctrl+C between the tool_calls (flag from the _sigint handler).
       if [[ -n "${_turn_aborted:-}" ]]; then
+        _pp_cleanup
         _abort_turn_tools "$i" "$tool_count" "$tool_calls_json"
         return 0
       fi
@@ -3963,23 +4860,35 @@ run_turn() {
       name="$(jq -r '.function.name' <<< "$tc" 2>/dev/null)"
       args="$(jq -r '.function.arguments // empty' <<< "$tc" 2>/dev/null)"
       tci="$(jq -r '.id // empty' <<< "$tc" 2>/dev/null)"
-      # tool trace: show the human THAT work is happening (stderr, only TTY/LEX_TRACE)
-      _trace_line "$name" "$(_hint_args "$args")"
-      # without command substitution: dispatch_tool then runs in this shell,
-      # so the MCP session (ref snapshot, tab state) survives several turns.
-      # else instead of ||: a failing mktemp must not run dispatch twice
-      # (review finding 2026-09-29).
-      _dtf="$(mktemp 2>/dev/null)"
-      if [[ -n "$_dtf" ]]; then
-        dispatch_tool "$name" "$args" >"$_dtf" 2>&1
-        result="$(cat "$_dtf")"
-        rm -f "$_dtf"
+      if [[ -n "${_pp_pid[$i]:-}" ]]; then
+        # parallel run: the child was already running (trace came at start) —
+        # here just wait and collect the result in order.
+        wait "${_pp_pid[$i]}" 2>/dev/null
+        result="$(cat "${_pp_file[$i]}" 2>/dev/null)"
+        rm -f "${_pp_file[$i]}"
+        _pp_pid[$i]=""
+        _pp_file[$i]=""
       else
-        result="$(dispatch_tool "$name" "$args" 2>&1)"
+        # tool trace: show the human THAT work is happening (stderr, only TTY/LEX_TRACE)
+        _trace_line "$name" "$(_hint_args "$args")"
+        # without command substitution: dispatch_tool then runs in this shell,
+        # so the MCP session (ref snapshot, tab state) survives several turns.
+        # else instead of ||: a failing mktemp must not run dispatch twice
+        # (review finding 2026-09-29).
+        _dtf="$(mktemp 2>/dev/null)"
+        if [[ -n "$_dtf" ]]; then
+          dispatch_tool "$name" "$args" >"$_dtf" 2>&1
+          result="$(cat "$_dtf")"
+          rm -f "$_dtf"
+        else
+          result="$(dispatch_tool "$name" "$args" 2>&1)"
+        fi
       fi
       # Ctrl+C during the tool run (child dead, result discarded) — the rest
-      # of the batch is answered with a marker to stay protocol-conform.
+      # of the batch is answered with a marker to stay protocol-conform; from the
+      # parallel run all still open children are answered here.
       if [[ -n "${_turn_aborted:-}" ]]; then
+        _pp_cleanup
         _abort_turn_tools "$i" "$tool_count" "$tool_calls_json"
         return 0
       fi
@@ -4026,12 +4935,15 @@ run_turn() {
       loop_tool="$(jq -r '[.[] | .function.name] | join(",")' <<< "$tool_calls_json" 2>/dev/null)"
       if (( _loop_hits == 0 )); then
         _loop_hits=1
-        _loop_run=0
         echo "⚠️  Fail memory: ${loop_tool:-tool} ran three times identically (args AND result) — nudge." >&2
         log "run_turn: loop-guard nudge tools=${loop_tool:-?} run=$_loop_run"
         session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
           --arg tools "${loop_tool:-}" --argjson run "$_loop_run" \
           '{type:"loop_guard",ts:$ts,tools:$tools,action:"nudge",run:$run}')"
+        # N2 (audit 2026-10-08): reset ONLY after log/session record — before
+        # _loop_run=0 stood BEFORE the recording and every nudge record
+        # contained "run":0 instead of the actual hit count (here 3).
+        _loop_run=0
         append_message "user" "The same tool result came three times identically: ${loop_tool:-tool} did not change. Repeat NOTHING: change the method or close the task in one sentence — sending the same arguments again changes nothing."
         _rb_override=0
         continue
@@ -4086,8 +4998,14 @@ _tool_spill() {
   local name="$1" data="$2" dir f old
   dir="${_lex_home:-${LEX_HOME:-$HOME/.lex}}/toolout"
   mkdir -p "$dir" 2>/dev/null || return 1
+  chmod 700 "$dir" 2>/dev/null || true
   f="$dir/$(date +%Y%m%d-%H%M%S)-$$-${name}.txt"
-  printf '%s' "$data" > "$f" 2>/dev/null || return 1
+  # M1 (audit 2026-10-08): tight permissions + redaction. Before, the full
+  # tool output (passwords, tokens, ...) landed on disk unprotected and
+  # UNREDACTED — 600/_redact only applied to sessions/. The later read_file
+  # detour redacts anyway, so a raw spill only helped attackers.
+  ( umask 077; printf '%s' "$(_redact "$data")" > "$f" ) 2>/dev/null || return 1
+  chmod 600 "$f" 2>/dev/null || true
   while IFS= read -r old; do
     [[ -n "$old" ]] || continue
     rm -f "$dir/$old" 2>/dev/null || true
@@ -4144,6 +5062,20 @@ cmd_status() {
   printf '  mem       : %s (%s entries)\n' "$_mem_dir" "$mem_entries"
   printf '  wiki      : %s%s\n' "$_wiki_dir" "$([[ -d "$_wiki_dir" ]] && echo '' || echo '  (missing, fetch creates it)')"
   printf '  htools    : %s%s\n' "$_htools_dir" "$([[ -d "$_htools_dir" ]] && echo '' || echo '  (missing — mkdir -p)')"
+  printf '  hooks     : %s pre, %s post (LEX_HOOKS=%s)\n' \
+    "$(find "${_lex_home}/hooks/pre_tool" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(find "${_lex_home}/hooks/post_tool" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')" \
+    "${LEX_HOOKS:-on}"
+  local mcp_cache_n
+  mcp_cache_n="$(_mcp_cache_entries 2>/dev/null | jq -r 'length' 2>/dev/null)" || mcp_cache_n=""
+  [[ "$mcp_cache_n" =~ ^[0-9]+$ ]] || mcp_cache_n=0
+  printf '  mcp-cache : %s entries (%s)\n' "$mcp_cache_n" "$(_mcp_cache_file)"
+  printf '  skills    : %s (%s)\n' \
+    "$(find "${_lex_home}/skills" -maxdepth 2 -name SKILL.md -type f 2>/dev/null | wc -l | tr -d ' ')" \
+    "${_lex_home}/skills"
+  printf '  tasks     : %s active, %s total (%s)\n' \
+    "$(_task_running_count)" "$(_task_dirs | wc -l | tr -d ' ')" \
+    "$(_task_dir)"
   printf '  turns     : %s\n' "$_turn_count"
   # Compaction status (step 42) + context fill level.
   printf '  compact   : %s · threshold %s · keep %s · buffer %s · %sx compacted\n' \
@@ -4174,17 +5106,25 @@ cmd_server_status() {
   local pid health model_json ram_total ram_used ram_pct
   local model_name n_ctx n_params n_vocab quant
 
-  # 1. Health
-  health="$(curl -sf --max-time 3 "http://127.0.0.1:8080/health" 2>/dev/null)"
+  # M5 (2026-10-08): same source as server_hint — the origin from
+  # `_api_url`, not hardcoded 127.0.0.1:8080. Before, the two ways
+  # contradicted each other (hint showed the configured port, status asked
+  # 8080 and reported "not reachable" although the server was running).
+  local origin
+  origin="$(printf '%s' "${_api_url:-}" | sed -E 's#^([a-z]+://[^/]+).*#\1#')"
+  [[ "$origin" == *://* ]] || origin="http://127.0.0.1:8080"
+
+  # 1. Health — "not running" is an error state, not success (rc 1)
+  health="$(curl -sf --max-time 3 "$origin/health" 2>/dev/null)"
   if [[ -n "$health" ]]; then
     printf '  health    : %s\n' "$health"
   else
-    printf '  health    : not reachable (server not running?)\n'
-    return 0
+    printf '  health    : not reachable (server not running? port from %s)\n' "$origin" >&2
+    return 1
   fi
 
   # 2. Model info
-  model_json="$(curl -sf --max-time 5 "http://127.0.0.1:8080/v1/models" 2>/dev/null)"
+  model_json="$(curl -sf --max-time 5 "$origin/v1/models" 2>/dev/null)"
   if [[ -n "$model_json" ]]; then
     model_name="$(jq -r '.data[0].id // .models[0].name // "?"' <<< "$model_json" 2>/dev/null)"
     n_ctx="$(jq -r '.data[0].meta.n_ctx // empty' <<< "$model_json" 2>/dev/null)"
@@ -4361,7 +5301,7 @@ oneshot() {
 # Install
 # ---------------------------------------------------------------------------
 install_lex() {
-  mkdir -p "${_lex_home}/log" "${_lex_home}/sessions" "${_lex_home}/mem" "${_lex_home}/hooks" "${_lex_home}/agents" "${_lex_home}/skills" "${_lex_home}/prompts"
+  mkdir -p "${_lex_home}/log" "${_lex_home}/sessions" "${_lex_home}/mem" "${_lex_home}/hooks/pre_tool" "${_lex_home}/hooks/post_tool" "${_lex_home}/agents" "${_lex_home}/skills" "${_lex_home}/prompts" "${_lex_home}/tasks"
   chmod 700 "${_lex_home}/sessions" 2>/dev/null || true
   if [[ ! -f "${_lex_home}/settings.json" ]]; then
     cat > "${_lex_home}/settings.json" <<EOF
@@ -4399,7 +5339,7 @@ _swap_slot0() {
     setup_messages   # unreachable in the REPL (slot 0 is always system)
     return 0
   fi
-  sys="${_system_prompt}$(_wiki_ex)"
+  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)"
   stf="$(mktemp)" || { echo "❌ cannot create temp file." >&2; return 1; }
   if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then
     rm -f "$stf"; echo "❌ prompt temp file not writable." >&2; return 1
@@ -4676,7 +5616,7 @@ LURK_EOF
       # Ticker only at a real terminal (REPL) — tests/oneshot start no
       # background process; stop via _lurk_ticker_stop on off/displacement.
       [[ -t 0 ]] && _lurk_ticker_start
-      echo "✓ Lurk mode active — watcher prompt, tick every ${LEX_LURK_INTERVAL:-20}s."
+      echo "✓ Lurk mode active — watcher prompt, tick every $(_lurk_interval)s."
       echo "  Marker: lexl> (open alerts: lexl!N>) · /lexlurk alerts · /lexlurk status"
       echo "  back: /lexlurk off · /lex = original · /lexpen = engineer persona"
       ;;
@@ -4694,7 +5634,7 @@ LURK_EOF
       echo "✓ Lurk mode off — original prompt active again (baseline/alerts remain)."
       ;;
     status)
-      echo "Lurk: $([[ -n "${_lurk_active:-}" ]] && echo active || echo inactive) · open alerts: ${_lurk_open:-0} · tick: ${LEX_LURK_INTERVAL:-20}s"
+      echo "Lurk: $([[ -n "${_lurk_active:-}" ]] && echo active || echo inactive) · open alerts: ${_lurk_open:-0} · tick: $(_lurk_interval)s"
       _lurk_watch --status || true
       ;;
     alerts)
@@ -4714,12 +5654,61 @@ LURK_EOF
   return 0
 }
 
+# N1 (audit 2026-10-08): the pending counter was a read-modify-write WITHOUT
+# lock — ticker (background subshell) and flush (REPL) share the file, two
+# lex instances on the same LEX_HOME on top. Consequence: lost alert counts
+# or double displays. Now flock around the WHOLE sequence.
+# IMPORTANT: the lock sits in the current process (not `$(…)` — there the fd
+# would close again with the subshell immediately and the lock would be
+# worthless).
+_lurk_pending_lock() { # $1 = file -> fd in $_lp_fd (empty = without lock)
+  _lp_fd=""
+  command -v flock >/dev/null 2>&1 || return 0
+  # Finding 2026-10-08: `exec` WITHOUT command redirects `2>/dev/null` too
+  # into the WHOLE SHELL — stderr would be dead afterwards (test [FAIL] lines,
+  # trace, HUD vanish silently). The group `{ …; } 2>/dev/null` applies only
+  # during that; the fd stays with the shell (checked with flock).
+  { exec {_lp_fd}>"$1.lock"; } 2>/dev/null || { _lp_fd=""; return 0; }
+  flock -x "$_lp_fd" 2>/dev/null || { { exec {_lp_fd}>&-; } 2>/dev/null; _lp_fd=""; }
+}
+
+_lurk_pending_unlock() {
+  [[ -n "${_lp_fd:-}" ]] || return 0
+  flock -u "$_lp_fd" 2>/dev/null || true
+  { exec {_lp_fd}>&-; } 2>/dev/null || true
+  _lp_fd=""
+}
+
+_lurk_pending_add() { # $1 = new alert count -> raise counter (locking)
+  local f="${_lex_home}/lurk/pending" n="$1" cur
+  [[ "$n" =~ ^[0-9]+$ ]] || return 0
+  (( n > 0 )) || return 0
+  mkdir -p "${_lex_home}/lurk" 2>/dev/null || return 0
+  _lurk_pending_lock "$f"
+  cur="$(cat "$f" 2>/dev/null)"
+  [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+  printf '%s\n' "$(( cur + n ))" > "$f"
+  _lurk_pending_unlock
+  return 0
+}
+
+_lurk_pending_drain() { # output counter AND empty the file (locking)
+  local f="${_lex_home}/lurk/pending" n
+  [[ -f "$f" ]] || { printf '0\n'; return 0; }
+  _lurk_pending_lock "$f"
+  n="$(cat "$f" 2>/dev/null)"
+  rm -f "$f"
+  _lurk_pending_unlock
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s\n' "$n"
+}
+
 # One watcher tick (background ticker in lurk mode): quiet rc0/rc2, at rc1
 # alert: pending file instead of stdout, bell, desktop notification.
 # _lurk_open grows only in the flush (REPL) — the tick itself must stay
 # silent (it runs while the user is typing).
 _lurk_tick() {
-  local out rc n f add
+  local out rc n
   out="$(_lurk_watch --check 2>/dev/null)"
   rc=$?
   (( rc == 1 )) || return 0
@@ -4729,11 +5718,7 @@ _lurk_tick() {
   # pending file instead of stdout: the tick runs in the BACKGROUND — any
   # line on stdout mid-typing would destroy the input line (user report
   # 2026-10-08 "jumps back while typing, overwrites every few seconds").
-  f="${_lex_home}/lurk/pending"
-  mkdir -p "${_lex_home}/lurk" 2>/dev/null || return 0
-  add="$(cat "$f" 2>/dev/null || echo 0)"
-  [[ "$add" =~ ^[0-9]+$ ]] || add=0
-  printf '%s\n' "$(( add + n ))" > "$f"
+  _lurk_pending_add "$n"
   # Bell via /dev/tty: control char without cursor movement — beeps,
   # leaves the input line alone. Subshell: without a TTY (tests) the
   # redirection error stays silent (flat form had it on stderr).
@@ -4749,10 +5734,8 @@ _lurk_tick() {
 # marker lexl!N> precede the new prompt): read pending, bump _lurk_open,
 # remove the file.
 _lurk_pending_flush() {
-  local f="${_lex_home}/lurk/pending" n
-  [[ -f "$f" ]] || return 0
-  n="$(cat "$f" 2>/dev/null || echo 0)"
-  rm -f "$f"
+  local n
+  n="$(_lurk_pending_drain)"
   [[ "$n" =~ ^[0-9]+$ ]] || return 0
   (( n > 0 )) || return 0
   _lurk_open=$(( ${_lurk_open:-0} + n ))
@@ -4763,12 +5746,29 @@ _lurk_pending_flush() {
 # (default 20s). Once the REPL is gone (kill -0 $$) it exits on its own —
 # no orphan process. Stop via _lurk_ticker_stop (kill + pkill -P for the
 # running sleep).
+# N5 (audit 2026-10-08): valid tick interval — integer >= 1, otherwise 20.
+# Before the raw value went straight into `sleep`: "abc"/"0" failed and
+# `|| exit 0` ended the watcher SILENTLY while /lexlurk status kept
+# reporting "Tick: abc".
+_lurk_interval() {
+  local v="${LEX_LURK_INTERVAL:-20}"
+  if [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1 )); then
+    printf '%s\n' "$v"
+  else
+    printf '20\n'
+  fi
+}
+
 _lurk_ticker_start() {
   _lurk_ticker_stop
+  local iv
+  iv="$(_lurk_interval)"
+  [[ "$iv" == "${LEX_LURK_INTERVAL:-20}" ]] ||
+    log "lurk-ticker: invalid LEX_LURK_INTERVAL='${LEX_LURK_INTERVAL:-}' — using ${iv}s"
   (
     trap 'exit 0' TERM INT HUP
     while :; do
-      sleep "${LEX_LURK_INTERVAL:-20}" || exit 0
+      sleep "$iv" || exit 0
       kill -0 "$$" 2>/dev/null || exit 0
       _lurk_tick
     done
@@ -4815,7 +5815,7 @@ Slash commands (REPL):
   /lexpen             set system prompt to the Lex persona (senior-engineer style)
   /lexlurk [on|off|status|alerts [n]|check]
                       Lurk watch: blue-team lurk mode with watcher rules;
-                      tick every ${LEX_LURK_INTERVAL:-20}s, marker lexl>
+                      tick every $(_lurk_interval)s, marker lexl>
                       (open alerts lexl!N), alerts in ~/.lex/lurk/alerts.jsonl
   mode currently active: ${modes} (slot 0 is exclusive — one displaces the other)
   /autosudo           automatically answer y/N approvals in the sudo gate (on|off|status)
@@ -4826,6 +5826,9 @@ Slash commands (REPL):
 Security:
   tool_bash has a hard deny list (rm -rf /, block devices, su, pipes,
   reboots) — that always applies. --approve additionally asks before each run.
+  Hooks: executable files in ~/.lex/hooks/pre_tool/ (rc != 0 blocks the
+  tool call) and ~/.lex/hooks/post_tool/ (observes) — env LEX_HOOKS=off,
+  LEX_HOOK_TIMEOUT=seconds; env per run LEX_HOOK_EVENT/TOOL/ARGS/RC.
   sudo is not a ban but a gate (§6 #13): without a valid sudo ticket
   EXACTLY ONE prompt appears on the terminal with the command, the
   password goes straight to sudo; with a valid ticket lex asks ONCE per
@@ -4841,7 +5844,7 @@ Config (4 tiers, ENV overrides):
   ENV: LEX_API_URL, LEX_API_KEY, LEX_MODEL, LEX_MAX_TOKENS, LEX_REASONING_BUDGET,
        LEX_REASONING_BUDGET_FOLLOWUP, LEX_AUTO_DISABLE_THINKING_WITH_TOOLS,
        LEX_TEMPERATURE, LEX_MAX_TURNS, LEX_TOOL_TIMEOUT,
-       LEX_TOOL_MAX_OUTPUT,
+       LEX_TOOL_MAX_OUTPUT, LEX_PARALLEL,
        LEX_CTX_LIMIT, LEX_COMPACT, LEX_COMPACT_KEEP, LEX_COMPACT_BUFFER,
        LEX_API_RETRIES, LEX_LOOP_GUARD, LEX_SILENT_TURNS, LEX_REASONING_STORE_MAX,
        LEX_LOG_DIR, LEX_MOCK, LEX_MOCK_FILE, LEX_APPROVE, LEX_SUDO, LEX_SUDO_APPROVE,
@@ -4849,7 +5852,9 @@ Config (4 tiers, ENV overrides):
        LEX_SESSION, LEX_MEM_DIR,
        LEX_WIKI_DIR, LEX_HTOOLS_DIR, LEX_TRACE, LEX_SHOW_REASONING, LEX_REASONING_MAX,
        LEX_TRACE_RESULT_MAX, LEX_MD_CELL_MAX, LEX_MCP, LEX_MCP_TIMEOUT, LEX_SEARCH_URL, LEX_SEARCH_TIMEOUT,
-       LEX_LURK_INTERVAL, LEX_LURK_NO_NOTIFY, LEX_LURK_DIR
+       LEX_LURK_INTERVAL, LEX_LURK_NO_NOTIFY, LEX_LURK_DIR,
+       LEX_SKILLS, LEX_SKILL_MAX, LEX_SKILL_TOTAL,
+       LEX_TASK_MAX, LEX_TASK_TIMEOUT
 
 Input: Readline (arrow keys, Ctrl-A/E/W/U, tab = path completion),
 History in ~/.lex/history (500 entries).
@@ -4863,11 +5868,14 @@ EOF
 #   trace level = aggregation: count, total duration, failures, per tool
 # ---------------------------------------------------------------------------
 cmd_eval() {
-  local dir="${LEX_LOG_DIR:-${_lex_home}/log}"
+  # order: ENV (LEX_LOG_DIR) -> settings `log_dir` (load_config, M4) ->
+  # hard default. Before the middle level was missing: --eval returned "No
+  # span log" with rc 0 although the file was in the configured folder.
+  local dir="${LEX_LOG_DIR:-${_log_dir:-${_lex_home}/log}}"
   local file="${1:-${dir}/spans.jsonl}"
   if [[ ! -f "$file" ]]; then
-    echo "No span log found ($file)."
-    return 0
+    echo "No span log found ($file)." >&2
+    return 1
   fi
   local total fails sum_ms total_ms verdict
   total=$(jq -s 'length' "$file" 2>/dev/null)
@@ -4909,20 +5917,30 @@ main() {
         ;;
       --eval)
         cmd="--eval"
-        shift
-        # optional argument: spans file
-        if (( $# > 0 )); then
-          _eval_file="$1"
+        # optional argument: spans file — NEVER a flag (finding N7,
+        # 2026-10-08: `lex --eval --approve` ate --approve as filename,
+        # contradicting the "flags in any order" rule above).
+        # No shift of its own: the closing shift at the loop end then
+        # pulls the file name along itself.
+        if (( $# > 1 )) && [[ "$2" != --* ]]; then
+          _eval_file="$2"
           shift
         fi
         ;;
       *)
-        if [[ -n "$cmd" ]]; then
+        if [[ "$cmd" == "--eval" && -z "${_eval_file:-}" && "$1" != --* ]]; then
+          # positional argument AFTER another flag (N7 2026-10-08:
+          # `lex --eval --approve file` ended up here as "Unknown command",
+          # because --eval only accepted its optional argument directly
+          # behind itself).
+          _eval_file="$1"
+        elif [[ -n "$cmd" ]]; then
           echo "Unknown command: $1" >&2
           usage >&2
           exit 1
+        else
+          cmd="$1"
         fi
-        cmd="$1"
         ;;
     esac
     shift
@@ -4938,6 +5956,12 @@ main() {
       ;;
     --eval)
       _lex_home="${LEX_HOME:-$HOME/.lex}"
+      # M4 (2026-10-08): without load_config settings-`log_dir` never reached
+      # the evaluator — it only looked in LEX_LOG_DIR or the hard default and
+      # reported "No span log" (rc 0) although the file lay in the configured
+      # log folder. Errors must not abort eval: eval needs no model (the
+      # validation at the end of load_config does that).
+      load_config || true
       if [[ -n "${_eval_file:-}" ]]; then
         cmd_eval "$_eval_file"
       else
@@ -4945,6 +5969,9 @@ main() {
       fi
       ;;
     --server)
+      # M5: the status shows the configured port — for that the config must
+      # be loaded; a missing model must not block the status query.
+      load_config || true
       cmd_server_status
       ;;
     --install)

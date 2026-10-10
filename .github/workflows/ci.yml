@@ -34,10 +34,24 @@ jobs:
       - name: Installer (headless, prints the steps only)
         run: ./install.sh
 
+      # `if: always()` — finding M12 (2026-10-08): without the guard the
+      # hygiene step was skipped on test failure → a process leak after a
+      # red run stayed invisible. Patterns: every listener the suite can
+      # produce at all (ncat listeners + fake HTTP servers on the test
+      # ports 246xx + the marked exec-sleep long-runner from fake_mcp.sh
+      # whose argv[0] is `fake_mcp_hang`).
       - name: Hygiene (no leftover test processes)
+        if: always()
         run: |
-          if pgrep -f 'ncat --li[s]ten' >/dev/null 2>&1; then
-            echo "error: test ncat process still alive" >&2
+          leaks=""
+          for pat in 'ncat --li[s]ten' 'http[.]server 246[0-9][0-9]' 'fake_mcp[_]hang'; do
+            if pgrep -af "$pat" >/dev/null 2>&1; then
+              leaks="${leaks}pattern ${pat}:"$'\n'"$(pgrep -af "$pat")"$'\n'
+            fi
+          done
+          if [[ -n "$leaks" ]]; then
+            echo "error: test processes still alive:" >&2
+            printf '%s' "$leaks" >&2
             exit 1
           fi
           echo "clean"

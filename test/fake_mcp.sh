@@ -43,48 +43,71 @@ while IFS= read -r line; do
       args="$(jq -c '.params.arguments // {}' <<< "$line")"
       case "$tool" in
         fetch)
-          t="Auszug: $(jq -r '.url // ""' <<< "$args") (max $(jq -r '.max_length // 0' <<< "$args"))"
+          t="Excerpt: $(jq -r '.url // ""' <<< "$args") (max $(jq -r '.max_length // 0' <<< "$args"))"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         resolve-library-id)
           t='- Title: Fake
 - Context7-compatible library ID: /fake/lib
-- Description: Testbibliothek für lex
+- Description: Test library for lex
 - Code Snippets: 7'
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         query-docs)
-          t="DOKUMENTATION: $(jq -r '.query // ""' <<< "$args") (Quelle: $(jq -r '.libraryId // ""' <<< "$args"))"
+          t="DOCUMENTATION: $(jq -r '.query // ""' <<< "$args") (source: $(jq -r '.libraryId // ""' <<< "$args"))"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_navigate)
-          t="Gefahren nach: $(jq -r '.url // ""' <<< "$args")"
+          t="Navigated to: $(jq -r '.url // ""' <<< "$args")"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_snapshot)
-          t='Snapshot (Accessibility-Baum):
-- page "Startseite" [ref=s1e42]
-- heading "Willkommen" [ref=s1e43]
-- button "Absenden" [ref=s1e44]'
+          t='Snapshot (accessibility tree):
+- page "Home page" [ref=s1e42]
+- heading "Welcome" [ref=s1e43]
+- button "Submit" [ref=s1e44]'
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_click)
-          t="Geklickt: ref=$(jq -r '.ref // ""' <<< "$args") auf \"$(jq -r '.element // ""' <<< "$args")\""
+          t="Clicked: ref=$(jq -r '.ref // ""' <<< "$args") on \"$(jq -r '.element // ""' <<< "$args")\""
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_type)
-          t="Getippt nach ref=$(jq -r '.ref // ""' <<< "$args"): $(jq -r '.text // ""' <<< "$args")"
+          t="Typed after ref=$(jq -r '.ref // ""' <<< "$args"): $(jq -r '.text // ""' <<< "$args")"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
         browser_wait_for)
-          t="Gewartet: $(jq -r '.time // 1' <<< "$args")s"
+          t="Waited: $(jq -r '.time // 1' <<< "$args")s"
+          jq -cn --arg i "$id" --arg t "$t" \
+            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
+          ;;
+        browser_navigate_back)
+          # Audit gap 2026-10-08: without these three cases the lex pages
+          # back/tabs/close ended in the default branch ("unknown tool").
+          t="History back: (previous page)"
+          jq -cn --arg i "$id" --arg t "$t" \
+            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
+          ;;
+        browser_tabs)
+          if [[ "$(jq -r '.action // "list"' <<< "$args")" == "select" ]]; then
+            t="Tab selected: index=$(jq -r '.index // 0' <<< "$args")"
+          else
+            t='Tabs:
+- [1] Home page
+- [2] Example (active)'
+          fi
+          jq -cn --arg i "$id" --arg t "$t" \
+            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
+          ;;
+        browser_close)
+          t="Browser closed (all tabs)"
           jq -cn --arg i "$id" --arg t "$t" \
             '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:$t}]}}'
           ;;
@@ -96,24 +119,27 @@ while IFS= read -r line; do
           ;;
         boom)
           jq -cn --arg i "$id" \
-            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:"absichtlich kaputt"}], isError:true}}'
+            '{jsonrpc:"2.0", id:$i, result:{content:[{type:"text", text:"intentionally broken"}], isError:true}}'
           ;;
         hang)
-          exec sleep 30
+          # mark argv[0] (finding M12 2026-10-08): the CI hygiene step finds
+          # a long-runner left behind here via `fake_mcp_hang` instead of the
+          # unspecific pattern name `sleep 30`.
+          exec -a fake_mcp_hang sleep 30
           ;;
         die)
           exit 0
           ;;
         *)
           jq -cn --arg i "$id" \
-            '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unbekanntes Tool"}}'
+            '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unknown tool"}}'
           ;;
       esac
       ;;
     *)
       if [[ -n "$id" ]]; then
         jq -cn --arg i "$id" \
-          '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unbekannte Methode"}}'
+          '{jsonrpc:"2.0", id:$i, error:{code:-32601, message:"unknown method"}}'
       fi
       ;;
   esac

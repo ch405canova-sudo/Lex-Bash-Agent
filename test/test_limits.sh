@@ -213,6 +213,16 @@ else
   FAIL=1
 fi
 
+# M1 (audit 2026-10-08): the spill lies with 600 and REDACTED on disk —
+# before the raw tool output went unprotected into toolout/.
+m1="$(_tool_spill m1probe 'PASSWORD=hunter2 api_key=ghp_secret123')"
+check "limits (M1: spill created)" "$([[ -n "$m1" && -f "$m1" ]] && echo 1 || echo 0)"
+assert "limits (M1: spill mode 600)" "600" \
+  "$(stat -c '%a' "$m1" 2>/dev/null || stat -f '%Lp' "$m1" 2>/dev/null)"
+m1c="$(cat "$m1" 2>/dev/null)"
+check "limits (M1: secret redacted)" \
+  "$([[ "$m1c" != *hunter2* && "$m1c" != *ghp_secret123* && "$m1c" == *REDACT* ]] && echo 1 || echo 0)"
+
 # ===========================================================================
 # 6. server answer (llama→lex): 150 000 chars uncut in the context
 # ===========================================================================
