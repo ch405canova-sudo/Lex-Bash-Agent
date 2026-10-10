@@ -2549,7 +2549,10 @@ printf 'ok\n' > "$LEX_LURK_AUTH_LOG"
 printf '[j] Ban 1.1.1.1\n' > "$LEX_LURK_FAIL2BAN_LOG"   # baseline needs BOTH logs
 LEX_LURK_DIR="$LEX_HOME/lurk" "$WATCH" --start >/dev/null 2>&1
 printf '[j] Ban 9.9.9.9\n' >> "$LEX_LURK_FAIL2BAN_LOG"   # after: delta -> rc1
-out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf"
+# LEX_LURK_NO_NOTIFY=1: otherwise _lurk_tick fires REAL notify-send desktop
+# notifications here (user report 2026-10-09 „fail2ban bans 9.9.9.9" —
+# the IP is this fixture, not a real ban). The /dev/tty bell stays.
+out="$(bash -c 'export LEX_HOME="$1" LEX_MODEL="$1/model.gguf" LEX_LURK_NO_NOTIFY=1
   source "$2" "" </dev/null >/dev/null 2>&1
   o="$(_lurk_tick 2>&1)"; p=$([[ -f $LEX_HOME/lurk/pending ]] && cat $LEX_HOME/lurk/pending || echo none)
   printf "out=[%s]|pending=%s" "$o" "$p"' _ "$TMP" "$LEX_BIN" 2>&1)"

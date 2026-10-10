@@ -231,6 +231,25 @@ observations). Every fix built individually and then fully tested.
 - `run_all`13/13 = **941 [PASS] =928 individual**; lint clean; `lex`
  4966 → **5001 lines**. No commit (order open).
 
+### Fixed2026-10-09 — Test suite fired real desktop notifications (`9.9.9.9`)
+
+- **`test_features` `_lurk_tick` functional test leaked `notify-send`
+  desktop alerts** (user report: “fail2ban keeps banning 9.9.9.9” — the IP
+  is the test fixture `printf '[j] Ban 9.9.9.9'`, not a real ban). The
+  test sourced `lex` and called `_lurk_tick` with a forced `rc1` delta but
+  never set `LEX_LURK_NO_NOTIFY`, so `_lurk_tick`’s `notify-send -u
+  critical "lex lurk" …` fired against the real desktop on every
+  `run_all.sh`/`test_features.sh` run. Watch-dir isolation was already
+  correct (`LEX_HOME=$TMP`); only the notification path was not gated.
+  Fix: export `LEX_LURK_NO_NOTIFY=1` inside the test’s `bash -c` before
+  `_lurk_tick`. No production change (`lex:5724` gate was correct all
+  along). Verified: `run_all.sh` 13/13 green, no desktop alert on the
+  tick test.
+- Related but separate: the `lurk_watch.sh` last-ban-line fix (`grep ' Ban
+  ' | tail -n1` instead of `tail -n1` of the raw log) shipped in the
+  preceding commit — that one corrected *which* line the alert names, this
+  one stops the alert from escaping the test sandbox at all.
+
 ## [0.2.1] — 2026-10-08
 
 ### Fixed 2026-10-08 — `/lexlurk` input fix (no more `read -t` in the REPL loop)
