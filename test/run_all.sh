@@ -5,6 +5,17 @@
 set -u
 set -o pipefail
 
+# background inheritance guard (finding 2026-10-10, see test_input.sh): if
+# run_all runs from a background job (lex' tool_bash starts that way), all
+# the runners inherit SIGINT=ignore and the ^C needles go red without a
+# defect. One-time reset before the first runner.
+_sigign="$(awk '/^SigIgn:/{print $2}' /proc/$$/status 2>/dev/null || true)"
+if [[ -n "${_sigign:-}" ]] && command -v env >/dev/null 2>&1 \
+   && env --help 2>/dev/null | grep -q -- '--default-signal' \
+   && (( (16#$_sigign >> 1) & 1 )); then
+  exec env --default-signal=INT bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEX_DIR="$(dirname "$SCRIPT_DIR")"
 LEX_BIN="$LEX_DIR/lex"
@@ -71,7 +82,7 @@ testboden_check() {
 }
 
 # Syntax check as wide as CLAUDE.md/CI demand (finding N9 2026-10-08:
-# before only `lex` + `llama-proxy.sh` — `lurk_watch.sh`, `werkstatt_index.sh`
+# before only `lex` + `llama-proxy.sh` — `werkstatt_index.sh`
 # and the test files themselves were never syntax-checked locally). Arguments
 # overwrite the file list (self-test in the testboden).
 syntax_check() {
@@ -92,9 +103,11 @@ run_test "testboden"   testboden_check
 run_test "syntax"        syntax_check
 run_test "input"        "$SCRIPT_DIR/test_input.sh"
 run_test "tools"        "$SCRIPT_DIR/test_tools.sh"
+run_test "selfedit"     "$SCRIPT_DIR/test_selfedit.sh"
 run_test "loop"         "$SCRIPT_DIR/test_loop.sh"
 run_test "http"         "$SCRIPT_DIR/test_http.sh"
 run_test "features"     "$SCRIPT_DIR/test_features.sh"
+run_test "mem_pref"     "$SCRIPT_DIR/test_mem_pref.sh"
 run_test "proxy"        "$SCRIPT_DIR/test_proxy.sh"
 run_test "sse"          "$SCRIPT_DIR/test_sse.sh"
 run_test "eval"         "$SCRIPT_DIR/test_eval.sh"

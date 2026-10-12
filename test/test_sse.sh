@@ -210,8 +210,8 @@ printf '%s\n' \
   'data: {"choices":[{"index":0,"delta":{"content":"Partial text."}}]}' \
   '' \
   'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}' \
-  '' > "$TMP/kein_done.sse"
-start_fake "$TMP/kein_done.sse"
+  '' > "$TMP/no_done.sse"
+start_fake "$TMP/no_done.sse"
 rc=0
 out="$(run_turn "Test" 2>"$TMP/err6.txt")" || rc=$?
 assert "sse (partial text is used)" "Partial text." "$out"
@@ -221,8 +221,8 @@ contains "sse (without [DONE] → explicit warning)" "without [DONE]" "$(cat "$T
 # ---------------------------------------------------------------------------
 # 7. body without a data:-event → evaluable error, no empty "answer"
 # ---------------------------------------------------------------------------
-printf 'this is no stream\n' > "$TMP/kein_stream.sse"
-start_fake "$TMP/kein_stream.sse"
+printf 'this is no stream\n' > "$TMP/no_stream.sse"
+start_fake "$TMP/no_stream.sse"
 rc=0
 run_turn "Test" >"$TMP/out7.txt" 2>"$TMP/err7.txt" || rc=$?
 check "sse (body without data:-event → rc != 0)" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"

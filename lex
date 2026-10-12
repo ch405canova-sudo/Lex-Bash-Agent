@@ -249,14 +249,12 @@ _default_max_tokens=16384
 # even for mini turns ("append log"), ~50k thinking tokens over a 51-turn
 # run. First turn (planning) thinks deeper, follow-up turns (tool results)
 # stay brief; hard ceiling with the budget message (ai.sh
-# --reasoning-budget-message).
 _default_reasoning_budget=2048
 _default_reasoning_budget_followup=768
 # Lever 2 (overthinking, 2026-10-07): chat_template_kwargs
 # auto_disable_thinking_with_tools — as soon as tools are in the request,
 # the template starts without thinking (chat_template.jinja line 32).
 # Default off = unchanged behaviour; on = every tool turn without
-# reasoning (faster, less thinking effort).
 _default_auto_disable_thinking_with_tools=off
 _default_temperature=0.7
 # API retries (step 53, §6 #36): 0 = off, default 2 like the OpenAI SDK.
@@ -491,13 +489,12 @@ load_config() {
 # The second alternative of the value group excludes quotes: otherwise the
 # pattern eats the closing quote of a JSON line (session_write) and the line
 # would no longer be valid JSON.
-# Trailing newlines are kept — $( … ) would strip them, and the line count in
-# _trace_result hangs on that (found 2026-10-06: "12 lines in total" became
-# 11 as soon as the output went through the redactor).
-# Call: _redact "$text" -> stdout.
 _redact() {
   local t="${1:-}" trail="" out
   [[ -z "$t" ]] && return 0
+  # Remember the trailing newlines: $( … ) would strip them, and the
+  # line count in _trace_result hangs on it (finding 2026-10-06: "12 lines
+  # total" became 11 whenever the output ran through the editor).
   while [[ "$t" == *$'\n' ]]; do
     trail+=$'\n'
     t="${t%$'\n'}"
@@ -532,6 +529,7 @@ _redact() {
   # of session.jsonl (finding 2026-10-08, audit H1: neither
   # `{"password": "x"}` nor `PASSWORD=`/`TOKEN=` were caught before —
   # prefilter case-sensitive, sed prefix demanded =: directly without `"`).
+  # Prefilter case-sensitive, sed prefix demanded `=:` directly without `"`.
   out="$(printf '%s' "$out" | sed -E \
     -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]"'"'"']*[=:][[:space:]]*)(\\?")([^"\\]*)(\\?")/\1\4<REDACTED>\6/Ig' \
     -e 's/((pass(word|wort)?|passwd|pwd|secret|token|apikey|api_key|api-key|auth|credentials?)[[:space:]"'"'"']*[=:][[:space:]]*)('"'"')([^'"'"']*)('"'"')/\1\4<REDACTED>\6/Ig' \
@@ -553,6 +551,9 @@ _redact_var() {
   printf -v "$1" '%s' "${__rl%$'\001'}"
 }
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 log() {
   local msg="$1"
   mkdir -p "$_log_dir" 2>/dev/null
@@ -632,10 +633,12 @@ Personality & style:
 "
 _prompt_ops="- **You verify with tools, not in your head:** \`bash -n\`, \`./test/run_all.sh\`, \`search\`, \`read_file\` and the logs are where certainty comes from — not from rethinking. If something is open, say clearly as a fact what is missing; that is a finding, not uncertainty.
 - **Thinking has an end:** check any one thing at most once with a tool — once the result arrived it is fact, not subject to further deliberation; deliberate only if the first check failed. If the thought circles (same point checked twice, finding only counter-checked), the answer is done — say it out instead of brooding on.
+- **Deliver first, refine second:** if the core deliverable is still missing — skill, playbook, patch, answer — that comes first, even if details still need improvisation; name leftovers as open points instead of refining them in the tail. When context gets tight (token HUD >80 % or budget messages), the rule doubles: secure and state the result first, then polish — a finished core with gaps beats a perfect part that never ends.
 - **Never guess, look it up:** for commands and flags use \`bash\` with \`<command> --help\` — **BEFORE you run an unfamiliar command for the first time whose flags you are not SURE about: the help first, never guess**; ideally \`<command> --help | head -30 && <command> <correct flags>\` in ONE bash run, so the right attempt continues directly and you don't lose a turn to guessing. For facts \`search\` (project and wiki) or \`web_search(query)\`/\`web_fetch(url)\`, for libraries and frameworks \`context7(...)\`. Only when research turns up nothing do you say openly what you don't know — a clear gap beats a fabricated answer.
 - **Substantiate or name it:** anything you can substantiate neither in the repo nor in the wiki (\`search\` you fetch with \`web_search(query)\`/\`web_fetch(url)\` — only afterwards is 'I don't know' the right answer. A plausible idea does not replace a source.
 - **Your project lies EXCLUSIVELY in ${_lex_repo_dir}** — the script, LEX.md, README.md, CLAUDE.md, CHANGELOG.md, test/ and tools/ live there. From there you read, search, test and correct. ${_ai_dir}/Repo-Lex is only an external GitHub push copy (EN port) and plays no role for ongoing operation — do NOT treat it as the project state and never work on it when 'the project' is mentioned. ${_wiki_dir} is memory and log only (index/log/errors), not the project.
 - **Errors are material:** when something fails, first find the cause (\`search\`, log files, \`mem_search\` for earlier failures), then the fix. Write the fix down: one line in ${_wiki_dir}/wiki/log.md, and for recurring problems a page at ${_wiki_dir}/wiki/errors/YYYY-MM-DD-<short>.md. Next time look there first instead of reinventing it.
+- **Reuse before rebuild:** before you build, clone, install or download — check whether it already exists: \`search\` in the wiki, ${_wiki_dir}/wiki/index.md, WERKSTATT.md and pentest-tools-katalog.md in ${_htools_dir}, the running plan (\`todo\`), the already cloned repo. No source build where a finished image, repo or wrapper exists; if something is missing it gets added — not reinvented.
 - **For humans at a terminal:** structure where it helps (short bullets, tables for comparisons and values), otherwise two to five sentences. No how-to tone, no repeating the question.
 
 You have 19 tools:
@@ -667,7 +670,7 @@ Wiki under ${_wiki_dir} (Karpathy layout):
 
 Rules:
 - Use the tools to solve your task.
-- **Larger tasks (more than 3 steps):** first record the steps in a sensible order with todo(action=add), then execute them step by step, ticking each off with todo(action=done, index=N). Only answer when everything is ticked off (VERIFY) — then briefly summarise what was done.
+- **Larger tasks (more than 3 steps):** first set down the steps in sensible order with todo(action=add), then execute step by step and tick off with todo(action=done, index=N). Only answer when everything is ticked off (VERIFY) — then briefly summarize what was done. **Before the first step is built, one sentence on the verification goal:** which reference value, test or measurement proves that the task is done (e.g. comparison against a shipped baseline/reference file, test run, hash)? Without a named goal no building, without a fulfilled goal no 'done' report — building without a counter-check is just work, not a result.
 - Before editing, read what already exists (mem_list/mem_search, read_file).
 - Be precise and focused. Always answer in English.
 - **No doubt loops:** don't ask 'are you sure?' when the information is sufficient, and don't renegotiate the whole task after a single error — find the cause, apply the fix, continue. Verification replaces self-introspection.
@@ -771,8 +774,48 @@ session_write() {
 # ---------------------------------------------------------------------------
 # message helpers (JSON array as a string)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Tool-call sanitization (finding 2026-10-10)
+# Truncated function.arguments (finish_reason=length) are INVALID
+# JSON. The server (llama.cpp) parses the arguments of all tool_calls in the
+# history to build the next request — a single broken JSON poisons every
+# follow-up request that way: HTTP 500 (parse_error.101, missing
+# closing quote), call_api retries (5xx is retryable) and aborts hard after
+# the last attempt. Exactly that happened on 2026-10-10: write_file-
+# arguments truncated mid-string at 44 775 characters, session
+# unusable. This function removes every entry with non-parseable
+# function.arguments; empty/missing arguments count as valid ({}).
+# $1 = tool_calls JSON array. Returns the cleaned array (error → []).
+# ---------------------------------------------------------------------------
+_tc_sanitize() {
+  printf '%s' "${1:-[]}" | jq -c \
+    'if type != "array" then []
+     else map(select((.function.arguments // "{}" | fromjson?) != null))
+     end' 2>/dev/null || printf '[]'
+}
+
 append_message_json() {
   local msg="$1" reasoning="${2:-}"
+  # Defense-in-depth (finding 2026-10-10): broken function.arguments NEVER into
+  # _messages or session.jsonl — the server parses them on every
+  # follow-up request (HTTP 500 parse_error.101) until the session is
+  # unusable. Even if another caller (not run_turn) supplies broken
+  # tool_calls, they are cleaned here before they reach the context
+  # or the store.
+  if jq -e '(.tool_calls? // []) | length > 0' <<< "$msg" >/dev/null 2>&1; then
+    local _san_tc _san_before _san_after
+    _san_before="$(jq -r '.tool_calls | length' <<< "$msg" 2>/dev/null || echo 0)"
+    _san_tc="$(jq -c '(.tool_calls // []) | map(select((.function.arguments // "{}" | fromjson?) != null)) | if length == 0 then . else . end' <<< "$msg" 2>/dev/null)"
+    if [[ -n "$_san_tc" ]]; then
+      msg="$(jq -c --argjson tc "$_san_tc" \
+        '.tool_calls = $tc | if ($tc | length) == 0 then del(.tool_calls) else . end' \
+        <<< "$msg" 2>/dev/null)" || true
+    fi
+    _san_after="$(jq -r '.tool_calls // [] | length' <<< "$msg" 2>/dev/null || echo 0)"
+    if [[ "$_san_after" =~ ^[0-9]+$ ]] && (( _san_after < _san_before )); then
+      log "append_message_json: $((_san_before - _san_after)) broken tool_call(s) removed (defense-in-depth)"
+    fi
+  fi
   # Everything via files (2026-09-30): `--arg`/`--argjson` as a shell argument
   # ends at MAX_ARG_STRLEN (128 KB) — the message would have been lost
   # (with heavy escaping even earlier). Instead --slurpfile/--rawfile.
@@ -895,7 +938,7 @@ _soul_ex() {
 }
 
 # ---------------------------------------------------------------------------
-# 5/6 skills (power round 2026-10-08): automatic SKILL.md injection.
+# 5/6 Skills (power round 2026-10-08): SKILL.md auto-injection.
 #
 # Every folder under ${_lex_home}/skills/<name>/ holding a SKILL.md ends up in
 # the system prompt with its frontmatter (name, description) AND body — small
@@ -986,6 +1029,58 @@ _skills_ex() {
   printf '\n\n# — Skills (auto-injected from %s) —\nThese instructions apply by themselves; the complete version always lies at the stated path.%s' "$dir" "$out"
 }
 
+# Preferences from the memory store into the system prompt.
+#
+# Context (2026-10-12, user question "why is your personality not injected?"):
+# `mem/` was WRITE-ONLY until now. setup_messages only injected
+# `${_system_prompt}$(_skills_ex)$(_wiki_ex)` — mem/ was never read anywhere;
+# `_mem_dir` appeared only in the definition, in the three mem tools and
+# in cmd_status, where it only COUNTS the entries (lex:5266). Six preferences lay
+# silently hidden, two of them security rules (sudo, pentest tools).
+# Exactly the shape of _skills_ex: gate + budget + visible truncation marker.
+# Deliberately ONLY `type: preference` — fact/memory/note is workshop knowledge
+# (nmap techniques, irssi state) and would end up as noise in the prompt.
+#
+# CONTRADICTIONS: the rule "newest entry wins" stands as TEXT in the block.
+# Without it two identically worded preferences cancel each other out — that was
+# exactly the case of the tone entries from 10-02 (relaxed/humorous) and 10-09 (only /lexpen,
+# standard without emojis): the newer one would have switched the tone off in doubt.
+_mem_pref_ex() {
+  local dir="$_mem_dir" f t body out="" used=0 cnt=0
+  local per tot
+  [[ "${LEX_MEM_PREF:-on}" == "off" ]] && return 0
+  [[ -d "$dir" ]] || return 0
+  per="$(_int_or "${LEX_MEM_PREF_MAX:-}" 2000)"
+  tot="$(_int_or "${LEX_MEM_PREF_TOTAL:-}" 6000)"
+  # File name carries a YYYYMMDDHHMMSS prefix → `sort -r` = newest first.
+  while IFS= read -r f; do
+    [[ -f "$f" && -r "$f" ]] || continue
+    t="$(grep -m1 '^type: ' "$f" 2>/dev/null | cut -d' ' -f2)"
+    [[ "$t" == "preference" ]] || continue
+    # _skills_body is called skills, but is a generic frontmatter scraper —
+    # mem_add writes the same YAML format (--- / date / type / slug / ---).
+    body="$(_skills_body "$f")"
+    # _skills_body leaves the blank line after the frontmatter in place — otherwise
+    # the bullet `- ` would stand alone on its line and the text
+    # would start on the next line (visible as a break in the prompt).
+    while [[ "$body" == $'\n'* ]]; do body="${body#$'\n'}"; done
+    [[ -n "$body" ]] || continue
+    if (( ${#body} > per )); then
+      body="${body:0:per}"$'\n'"… (truncated — complete under ${f})"
+    fi
+    if (( used + ${#body} > tot )); then
+      out+=$'\n'"… (${cnt} preferences shown, further ones omitted — LEX_MEM_PREF_TOTAL reached)"$'\n'
+      break
+    fi
+    out+=$'\n'"- ${body}"$'\n'"  (file: ${f})"$'\n'
+    used=$(( used + ${#body} + ${#f} + 16 ))
+    cnt=$(( cnt + 1 ))
+  done < <(find "$dir" -maxdepth 1 -name '*.md' -type f 2>/dev/null | LC_ALL=C sort -r)
+  # Stay silent even at 0 hits (no empty block) — but NEVER truncate silently.
+  [[ -n "$out" ]] || return 0
+  printf '\n\n# — Your preferences (auto-injected from %s) —\nIn case of contradictions the NEWEST entry counts; older ones are only history.%s' "$dir" "$out"
+}
+
 setup_messages() {
   session_init
   # O2 (step 17, 2026-09-29): wiki state always in context — index.md and
@@ -994,10 +1089,13 @@ setup_messages() {
   # System prompt + wiki also via a file: no 128-KB argument,
   # no truncation (before 100 000 bytes → wiki state was cut off).
   local sys stf rc
+  # Order IS weighting: preferences directly behind the identity (they
+  # belong to "who I am"), then skills ("how I work"), then the
+  # wiki excerpt as a reference at the prompt end.
   # 5/6: skills BEFORE the wiki state — instructions belong at the prompt end,
-  # the wiki excerpt stands behind them as a reference. The soul (soul.md)
+  # the wiki excerpt stands behind it as a reference. The soul (soul.md)
   # goes last — it is the highest-ranking style layer.
-  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)$(_soul_ex)"
+  sys="${_system_prompt}$(_mem_pref_ex)$(_skills_ex)$(_wiki_ex)$(_soul_ex)"
   stf="$(mktemp)" || { log "setup_messages: cannot create temp file"; return 1; }
   if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then rm -f "$stf"; return 1; fi
   _messages="$(jq -c -n --rawfile c "$stf" '[{role:"system",content:$c}]')"
@@ -1028,7 +1126,7 @@ _build_tools() {
     {type:"function",function:{name:"read_file",description:"Reads a file and returns its contents.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"}},required:["path"]}}},
     {type:"function",function:{name:"write_file",description:"Writes a file (overwrites an existing one).",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"},content:{type:"string",description:"File contents"}},required:["path","content"]}}},
     {type:"function",function:{name:"edit_file",description:"Replaces the first occurrence of a text block; with all:true it replaces every occurrence.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"},old:{type:"string",description:"Old text block"},new:{type:"string",description:"New text block"},all:{type:"boolean",description:"Replace every occurrence (default false)"}},required:["path","old","new"]}}},
-    {type:"function",function:{name:"bash",description:"Runs a shell command and returns stdout/stderr (hard deny list; sudo goes through an approval gate).",parameters:{type:"object",properties:{command:{type:"string",description:"Command"}},required:["command"]}}},
+    {type:"function",function:{name:"bash",description:"Runs a shell command and returns stdout/stderr (hard deny list; sudo goes through an approval gate). The exit code refers to the whole chain — pipes run with pipefail, a failed link delivers rc≠0 even if e.g. tail stood at the end.",parameters:{type:"object",properties:{command:{type:"string",description:"Command"}},required:["command"]}}},
     {type:"function",function:{name:"list_files",description:"Lists files. Without a pattern like ls -la; with pattern/recursive a file listing.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the directory"},pattern:{type:"string",description:"Glob against the file name, e.g. *.md"},recursive:{type:"boolean",description:"Recurse into subdirectories (default false)"}},required:["path"]}}},
     {type:"function",function:{name:"append_file",description:"Appends text to the end of a file without overwriting. For append-only files such as wiki/log.md.",parameters:{type:"object",properties:{path:{type:"string",description:"Path to the file"},content:{type:"string",description:"Text to append (own line)"}},required:["path","content"]}}},
     {type:"function",function:{name:"search",description:"Searches files and returns matches as path:line:text (locate before you write).",parameters:{type:"object",properties:{query:{type:"string",description:"Search term"},path:{type:"string",description:"Start path: file or directory (default: the project wiki)"},glob:{type:"string",description:"Filter on file names, e.g. *.md"},regex:{type:"boolean",description:"true = regular expression, default false = literal"}},"required":["query"]}}},
@@ -1043,7 +1141,7 @@ _build_tools() {
     {type:"function",function:{name:"browser",description:"Drives a real browser (Playwright-MCP, system Chrome): navigate → snapshot (ARIA refs) → click/type by ref. Full control, no screenshot needed — the snapshot is text.",parameters:{type:"object",properties:{action:{type:"string",enum:["navigate","snapshot","click","type","press","back","tabs","close","wait"],description:"navigate=url | snapshot=page picture as refs | click/type=ref from snapshot | press=key | back | tabs (index?) | close | wait (text=seconds until the page has loaded)"},url:{type:"string",description:"Target URL (action=navigate)"},ref:{type:"string",description:"Element ref from the snapshot (click/type) — take a fresh snapshot after navigation first"},element:{type:"string",description:"Short description of the target element (for click/type, e.g. submit button)"},text:{type:"string",description:"Input text (action=type) | seconds (action=wait)"},key:{type:"string",description:"Key or combination (action=press, e.g. Enter, Tab, Control+a)"},index:{type:"integer",description:"Tab number (action=tabs, without index = tab list)"}},required:["action"]}}},
     {type:"function",function:{name:"mcp",description:"Generic MCP access: calls tools of any configured server (defuddle, context7, playwright, desktop, postgres + everything from mcp.json). FIRST tool empty or __tools to fetch the tool list, THEN call tool+arguments. tool=__refresh rebuilds the discovery cache (~/.lex/mcp.cache.json) for ALL servers; the direct entries mcp__Server__Tool come from it.",parameters:{type:"object",properties:{server:{type:"string",description:"Server name, e.g. playwright or defuddle"},tool:{type:"string",description:"Tool name of the server, or __tools / empty for the discovery list"},arguments:{type:"object",description:"Arguments as a JSON object, e.g. {\"url\":\"https://example.com\"}"}},required:["server"]}}},
     {type:"function",function:{name:"agent",description:"Sub-agent with its own, fresh context: offload longer exploration, planning, review or summarization instead of filling the main context. Returns only the result.",parameters:{type:"object",properties:{task:{type:"string",description:"Task of the sub-agent (concrete, with target paths)"},mode:{type:"string",enum:["explore","plan","review","summarize"],description:"explore=explore and report (change nothing), plan=work out a plan, review=check and name findings, summarize=summarize"}},required:["task"]}}}
-    ,{type:"function",function:{name:"task",description:"Background task: starts a command detached (own session) and keeps an eye on it — for long or recurring work that keeps running while you work on something else. Output and result remain available after lex ends.",parameters:{type:"object",properties:{action:{type:"string",enum:["start","list","status","result","kill"],description:"start = start a command in the background, list = all tasks, status = individual status, result = fetch output, kill = stop"},command:{type:"string",description:"Shell command (with action start)"},id:{type:"string",description:"Task id like t1 (with status/result/kill)"},name:{type:"string",description:"Short name for the list (with action start)"},tail:{type:"integer",description:"Number of output lines (with result, default 200)"}},required:["action"]}}}
+    ,{type:"function",function:{name:"task",description:"Background task: starts a command detached (own session without TTY)  and keeps an eye on it — for long or recurring work that keeps running while you work on something else. Output and result remain available after lex ends. Sudo caution: without a TTY the task shell cannot enter a password — a sudo task requires NOPASSWD in the sudoers, otherwise starting is refused (rather run it in the foreground; NOPASSWD then applies to all processes).",parameters:{type:"object",properties:{action:{type:"string",enum:["start","list","status","result","kill"],description:"start = start a command in the background, list = all tasks, status = individual status, result = fetch output, kill = stop"},command:{type:"string",description:"Shell command (with action start)"},id:{type:"string",description:"Task id like t1 (with status/result/kill)"},name:{type:"string",description:"Short name for the list (with action start)"},tail:{type:"integer",description:"Number of output lines (with result, default 200)"}},required:["action"]}}}
   ] + $native'
 }
 
@@ -1142,14 +1240,14 @@ call_api() {
     local line
     # O3 (audit 2026-10-08): lock read-modify-write — two runs with the same
     # LEX_MOCK_FILE both read `head -n1` (the same answer) and wrote into the
-    # same `.tmp` (half-mixed state). Helper historically `_lurk_pending_*`
-    # (N1, §7/78), effect general: fd in the CURRENT process (no $(…)
+    # same `.tmp` (half-mixed state). Helper renamed to the generic
+    # `_pending_*` (N1, §7/78), effect generalized: fd in the CURRENT
     # subshell); without flock available the code continues without a lock —
     # exactly the behaviour as before.
-    _lurk_pending_lock "${_mock_file}"
+    _pending_lock "${_mock_file}"
     line="$(head -n1 "${_mock_file}" 2>/dev/null)"
     tail -n +2 "${_mock_file}" > "${_mock_file}.tmp" 2>/dev/null && mv "${_mock_file}.tmp" "${_mock_file}"
-    _lurk_pending_unlock
+    _pending_unlock
     if [[ -z "${line:-}" ]]; then
       echo '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
       return 0
@@ -1345,8 +1443,6 @@ tool_write_file() {
   fi
   # §6 #37: the wiki is documentation/log for humans — nothing secret belongs
   # there, even if the model context still needs it. Configs, scripts and
-  # everything outside $_wiki_dir stays exactly as the model wrote it
-  # (otherwise the AnonOps task would break).
   if [[ -n "${_wiki_dir:-}" && "$resolved" == "$_wiki_dir"/* ]]; then
     _redact_var content "$content"
   fi
@@ -1665,12 +1761,12 @@ _approve_request() {
 #     runs without further questions, no = y/N per command afterwards
 #     (_approve_request). /autosudo on and LEX_SUDO_APPROVE=0 also skip the
 #     session question.
-# No controlling TTY -> refusal. LEX_SUDO=0 switches sudo off completely.
 # ---------------------------------------------------------------------------
 # Session grant per lex session (process state, not a config key):
 #   "" = not asked yet, "1" = granted, "0" = declined (y/N per command)
 _sudo_grant=""
 _sudo_gate_reason=""
+
 _needs_sudo() {
   local c
   c="$(printf '%s' "$1" | tr -s '[:space:]' ' ')"
@@ -1733,6 +1829,23 @@ _sudo_gate() {
   if [[ "${_sudo:-1}" != "1" ]]; then
     _sudo_gate_reason="sudo disabled (LEX_SUDO=0)"
     return 1
+  fi
+  # /lexpen = root mode (user order 2026-10-12: "no more sudo
+  # needed"): no y/N approval, no session question, no password path
+  # per command. /lexpen on fetches the ticket ONCE (user decision
+  # 2026-10-12: "1× at /lexpen on"; NOPASSWD deliberately NOT — the
+  # sudoers applies to the whole system, also outside /lexpen). Without
+  # a ticket _sudo_ask intervenes hard here (password straight to sudo, never
+  # through lex). LEX_SUDO=0 above stays the hard off-switch.
+  if [[ -n "${_lexpen_active:-}" ]]; then
+    if ! _sudo_ticket_valid; then
+      if ! _sudo_ask "$cmd"; then
+        _sudo_gate_reason="/lexpen needs authenticated sudo, but there is none (no TTY, password aborted or ticket expired) — type the password in the sudo prompt at the terminal (the next /lexpen on will fetch it right away); permanently without asking would only work with NOPASSWD in the sudoers, which then applies to all processes"
+        return 1
+      fi
+    fi
+    log "sudo: /lexpen auto-grant (no approval/password question)"
+    return 0
   fi
   if ! _sudo_ticket_valid; then
     if ! _sudo_ask "$cmd"; then
@@ -1799,7 +1912,11 @@ tool_bash() {
   # hung as long as an orphan held the pipe (§6 #35).
   # _run_limited puts the output into $_rl_out, the child chain runs with its
   # own deadline in the background (file instead of pipe).
-  _run_limited "${_tool_timeout:-60}" bash -c "$command"
+  # pipefail (finding 2026-10-12): WITHOUT it `make … | tail -3` returned the rc of
+  # tail (always 0) — the model saw "Exit-Code: 0" and wrote despite
+  # the failed build "=== ZEEK INSTALLED ===". Now the
+  # chain reports the error of the failed link.
+  _run_limited "${_tool_timeout:-60}" bash -o pipefail -c "$command"
   rc=$?
   output="$_rl_out"
   # Permission -> sudo bridge (finding 2026-10-08, session 030808): for
@@ -1888,9 +2005,6 @@ tool_append_file() {
     return 1
   fi
   # §6 #37: the wiki is documentation/log for humans — nothing secret belongs
-  # there, even if the model context still needs it. Configs, scripts and
-  # everything outside $_wiki_dir stays exactly as the model wrote it
-  # (otherwise the AnonOps task would break).
   if [[ -n "${_wiki_dir:-}" && "$resolved" == "$_wiki_dir"/* ]]; then
     _redact_var content "$content"
   fi
@@ -2063,6 +2177,7 @@ tool_todo() {
 # readline of bash (arrow keys, Ctrl-A/E/W/U, tab = path completion),
 # the history lives as a file under ~/.lex/history (max. 500 entries).
 _hist_file=""
+
 _hist_init() {
   _hist_file="${_lex_home}/history"
   mkdir -p "$_lex_home" 2>/dev/null || return 0
@@ -3335,6 +3450,26 @@ _task_running_count() {
   printf '%s' "$n"
 }
 
+# Preflight for sudo in BACKGROUND tasks (finding 2026-10-12, t5/t6):
+# _sudo_gate checks in the foreground (context of the lex shell: controlling TTY,
+# running sudo ticket), but the task body shell runs in setsid —
+# ITS OWN session WITHOUT controlling TTY. sudoers stores tickets per TTY
+# (timestamp_type=tty, sudoers_timestamp(5)), the foreground ticket does not
+# apply in the child context, and nobody can type a password there.
+# Exactly that failed in t6 after a ~20 min build with "A terminal is
+# required to authenticate" — the gate had passed, the execution
+# did not (gate and execution in two different security contexts).
+# So we check NOW in the target context and refuse EARLY and honestly,
+# instead of seeing the error late in the build. A NOPASSWD rule (optional,
+# then applies to all processes) lets the check pass. Without setsid there is no
+# context split (nohup stays in the session) → check is skipped.
+_task_sudo_preflight() {
+  command -v sudo >/dev/null 2>&1 || return 0      # sudo missing → a runtime error is honest enough
+  command -v setsid >/dev/null 2>&1 || return 0
+  setsid --help 2>&1 | grep -q -- '-w' || return 0  # old util-linux without Wait
+  setsid -w sudo -n true </dev/null >/dev/null 2>&1
+}
+
 _task_start() {
   local command="$1" name="${2:-}" dir tid d i n max tmo runner body pid started deny
   if [[ -z "$command" ]]; then
@@ -3349,6 +3484,14 @@ _task_start() {
     return 1
   fi
   if _needs_sudo "$command"; then
+    # Preflight IN the target context (setsid child, see _task_sudo_preflight) —
+    # BEFORE the gate, so no password is fetched for the worthless foreground-
+    # context. LEX_SUDO=0 → the gate delivers the honest reason.
+    if [[ "${_sudo:-1}" == "1" ]] && ! _task_sudo_preflight; then
+      echo "Refused: sudo in a background task is not possible — the task shell runs without controlling TTY and sudo finds no authentication there (a sudo ticket of the TTY does not apply in the own session). Solution: run the command without task as a bash call in the foreground, where the password prompt appears at the terminal; optionally for permanent cases: add a NOPASSWD rule in the sudoers limited to these commands (needs root, then applies to all processes)."
+      log "tool: task sudo-preflight refused — child context without authentication"
+      return 1
+    fi
     if ! _sudo_gate "$command"; then
       echo "Refused: sudo — ${_sudo_gate_reason}."
       log "tool: task sudo refused — ${_sudo_gate_reason}"
@@ -3383,9 +3526,12 @@ _task_start() {
   # Deadline (optional): timeout(1) yields rc 124 and lands like every other
   # completion in the rc file.
   tmo="$(_int_or "${LEX_TASK_TIMEOUT:-}" 0)"
-  runner="bash -c $(printf '%q' "$command")"
+  # pipefail as in tool_bash (finding 2026-10-12): the task rc is the rc of the
+  # CHAIN, not that of `tail` — otherwise even a failed build
+  # reports 0 in the rc file.
+  runner="bash -o pipefail -c $(printf '%q' "$command")"
   if (( tmo > 0 )) && command -v timeout >/dev/null 2>&1; then
-    runner="timeout ${tmo} bash -c $(printf '%q' "$command")"
+    runner="timeout ${tmo} bash -o pipefail -c $(printf '%q' "$command")"
   fi
   # Body: write the pid from the VERY process that later also deletes it
   # (setsid may fork — $! would be the wrapper), then the command, then rc.
@@ -3405,6 +3551,12 @@ _task_start() {
   [[ -n "$name" ]] && printf 'name   : %s\n' "$name"
   printf 'command: %s\n' "${command:0:160}"
   printf 'status : task(action: status, id: %s) · output: task(action: result, id: %s)\n' "$tid" "$tid"
+  # Plan reminder (finding 2026-10-12): the HASSH order jumped without a plan
+  # and without a verification goal straight to building — the prompt rule alone
+  # was not enough. A soft hint at the most natural place to pick it up.
+  if [[ ! -s "$(_todo_file)" ]]; then
+    printf 'plan   : no active plan — plan multi-step tasks beforehand with todo(action=add) and think of the verification goal.\n'
+  fi
   return 0
 }
 
@@ -3523,8 +3675,159 @@ tool_task() {
   esac
 }
 
-dispatch_tool() {
+# ─── Self-edit sandbox (decision §2, 2026-10-12) ──────────────────────────
+# The hook guard 50-guard-lex-selfedit was deleted: it only blocked
+# write_file/edit_file/append_file (the bash tool went through unchecked, its
+# message even explained its own circumvention) and pushed the agent into the
+# bash+Python read-modify-write detour, which aborted before f.write() (§6 #89).
+# Replaced by checking instead of forbidding: the edit runs on a copy, the
+# gates run there, promotion only on green — the original stays
+# untouched throughout the whole check.
+#
+# Why here and not as a pre/post hook — two hard findings:
+#   (a) LEX_HOOK_ARGS is only exported as env (lex:3134), there is no
+#       read-back. A hook cannot rewrite the paths, only allow
+#       or block — "rewrite to the copy" is impossible there.
+#   (b) Hooks would have 5 s (LEX_HOOK_TIMEOUT, lex:3132) against ~87 s of the gates,
+#       and `_run_hooks post_tool … || true` (called at the end of
+#       `dispatch_tool`) swallows every failure SILENTLY. The verification
+#       would lie dead in secret — exactly the same false-green class that we
+#       want to get rid of.
+#   dispatch_tool itself has NO timeout budget — _default_tool_timeout
+#   (lex:263) only acts via _run_limited, and that is called exclusively by
+#   tool_bash (lex:1821) and the hooks (lex:3137). The gates fetch their
+#   deadline themselves: _run_limited with LEX_SELFEDIT_TIMEOUT
+#   (default 300 s per gate, incl. kill-tree) — if the suite hangs, it is
+#   charged and that counts as a failure → fail-closed, never a silent
+#   success. (Review finding B2, 2026-10-12 — this used to say incorrectly
+#   dispatch_tool had 300 s.) The advantage over the hook remains:
+#   not switchable off via LEX_HOOKS=off.
+#
+# KNOWN GAP (deliberate, like with the old guard): changes to lex via the
+# bash tool (sed -i, tee, python) do not go through the sandbox — likewise via
+# `task` (same deny/sudo hurdles, but arbitrary shell) and `mcp__*`. A
+# hook that checks commands against path patterns produces false positives. The risk
+# was deliberately traded for the reliability of the write path —
+# guardrail, not a prison.
 
+# $1 = tool name, $2 = args JSON → rc 0 only if the target is the lex script.
+_selfedit_ziel() {
+  case "${1:-}" in
+    write_file|edit_file|append_file) ;;
+    *) return 1 ;;
+  esac
+  local p real want rp
+  p="$(jq -r '.path // empty' <<< "${2:-}" 2>/dev/null)" || return 1
+  [[ -n "$p" ]] || return 1
+  # CANONICALIZATION MUST GO THROUGH safe_path (Review-B1, 2026-10-12):
+  # safe_path expands `~` itself (lex:1306), `readlink -f` alone resolves
+  # `~/Ai/lex/lex` to `$PWD/~/Ai/lex/lex`. Without this step a
+  # tilde path would have bypassed the sandbox SILENTLY — target check rc 1 (no
+  # gates, no lex.bak), and tool_write_file would then have written directly
+  # to the original via safe_path anyway. All three write tools
+  # call safe_path, so it fails identically on both sides.
+  p="$(safe_path "$p" 2>/dev/null)" || return 1
+  real="$p"; want="$_lex_script"
+  if command -v readlink >/dev/null 2>&1; then   # GNU-only → Guard §6 #8
+    rp="$(readlink -f -- "$p" 2>/dev/null)" && [[ -n "$rp" ]] && real="$rp"
+    rp="$(readlink -f -- "$_lex_script" 2>/dev/null)" && [[ -n "$rp" ]] && want="$rp"
+  fi
+  [[ "$real" == "$want" ]]
+}
+
+# Creates the sandbox and prints ONLY its path to stdout — everything else
+# belongs on stderr, otherwise the trash ends up in $(…) and the path is broken.
+# Without .git copied: the testboden HEAD comparison runs in the repo
+# anyway on the DoD run, and 12 M per edit would be waste.
+_selfedit_anlegen() {
+  local d rc=0
+  d="$(mktemp -d "${TMPDIR:-/tmp}/lex-sbx.XXXXXX" 2>/dev/null)" || return 1
+  mkdir -p "$d/tree" 2>/dev/null || { rm -rf -- "$d"; return 1; }
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --exclude='/.git' "$_lex_repo_dir/" "$d/tree/" >/dev/null 2>&1 || rc=1
+  else
+    ( cd "$_lex_repo_dir" && tar -cf - --exclude=./.git . ) 2>/dev/null \
+      | ( cd "$d/tree" && tar -xf - ) 2>/dev/null || rc=1
+  fi
+  if (( rc != 0 )) || [[ ! -f "$d/tree/lex" || ! -f "$d/tree/test/run_all.sh" ]]; then
+    rm -rf -- "$d"; return 1
+  fi
+  printf '%s\n' "$d"
+}
+
+# Gates on the sandbox. Deliberately only TWO, because selfcheck_lex.sh INTERNALLY
+# already runs bash -n (tools/selfcheck_lex.sh:31) and shellcheck -S warning
+# (tools/selfcheck_lex.sh:40) — a separate shellcheck gate would be
+# pure duplication and cost another ~4.9 s.
+_selfedit_pruefen() {          # $1 = sandbox root → rc 0 = all gates green
+  local root="$1" out lex="$1/tree/lex"
+  local tmo="${LEX_SELFEDIT_TIMEOUT:-300}"
+  # _selfedit_mode is deliberately GLOBAL: _selfedit_uebernehmen reports afterwards,
+  # what actually ran — never "gates green" when fast/off ran (Review-S4).
+  _selfedit_mode="full"
+  [[ -f "$lex" ]] || { echo "Self-edit: sandbox copy missing — original stays unchanged."; return 1; }
+
+  if [[ "${LEX_SELFEDIT_GATES:-full}" == "off" ]]; then
+    _selfedit_mode="off"
+    echo "⚠ Self-edit WITHOUT any check — the suite did NOT run (LEX_SELFEDIT_GATES=off)."
+    return 0
+  fi
+
+  # Gate 1/2: syntax + style + called-without-definition + core functions
+  if ! _run_limited "$tmo" bash "$root/tree/tools/selfcheck_lex.sh" "$lex"; then
+    echo "Self-edit REJECTED (gate 1/2 selfcheck) — original stays unchanged."
+    printf '%s\n' "${_rl_out:-}"
+    return 1
+  fi
+  out="${_rl_out:-}"
+
+  if [[ "${LEX_SELFEDIT_GATES:-full}" == "fast" ]]; then
+    _selfedit_mode="fast"
+    echo "⚠ Self-edit checked only up to gate 1/2 — THE SUITE DID NOT RUN (LEX_SELFEDIT_GATES=fast)."
+    printf '%s\n' "$out"
+    return 0
+  fi
+
+  # Gate 2/2: full suite against the sandbox copy (~84 s, measured 2026-10-12)
+  if ! _run_limited "$tmo" bash "$root/tree/test/run_all.sh"; then
+    echo "Self-edit REJECTED (gate 2/2 run_all) — original stays unchanged."
+    printf '%s\n' "${_rl_out:-}"
+    return 1
+  fi
+  out="${_rl_out:-}"
+  printf '%s\n' "$out" | tail -3
+  return 0
+}
+
+# Promotes the checked copy. Backup FIRST, then rename within the
+# same directory (= atomic). Advantage for the running process:
+# bash keeps the old file open, so the running inode stays untouched,
+# the running lex instance is not torn.
+_selfedit_uebernehmen() {      # $1 = sandbox root → rc 0 = promoted
+  local slex="$1/tree/lex" tmp mode="${_selfedit_mode:-full}"
+  [[ -f "$slex" ]] || return 1
+  mkdir -p "$_lex_home" 2>/dev/null || true
+  cp -p -- "$_lex_script" "${_lex_home}/lex.bak" 2>/dev/null \
+    || echo "Note: backup ${_lex_home}/lex.bak not writable — restore only via git." >&2
+  tmp="${_lex_script}.new.$$"
+  if ! cp -p -- "$slex" "$tmp" 2>/dev/null || ! mv -f -- "$tmp" "$_lex_script"; then
+    rm -f -- "$tmp" 2>/dev/null
+    echo "Self-edit: promotion failed — original stays unchanged."
+    return 1
+  fi
+  # Only AFTER the mv claim that it was promoted — and never "gates green",
+  # when only fast/off ran (Review-S4). Both warning lines before come from
+  # _selfedit_pruefen and only claim what was checked, not whether it
+  # was promoted.
+  case "$mode" in
+    fast) echo "Self-edit promoted (only gate 1/2 — the suite did NOT run). Backup: ${_lex_home}/lex.bak" ;;
+    off)  echo "Self-edit promoted (WITHOUT any check). Backup: ${_lex_home}/lex.bak" ;;
+    *)    echo "Self-edit promoted (gates green). Backup: ${_lex_home}/lex.bak" ;;
+  esac
+  return 0
+}
+
+dispatch_tool() {
   local name="$1" args="$2"
   local path content old new command all mtype query pattern recursive glob regex
   local todo_action text todo_index url topic title web_max ctx_lib
@@ -3542,6 +3845,24 @@ dispatch_tool() {
   if ! _run_hooks pre_tool "$name" "$args"; then
     printf '%s\n' "${_hook_msg:-Tool call blocked by hook.}"
     return 1
+  fi
+  # Self-edit sandbox (decision §2, 2026-10-12): an edit whose target
+  # the lex script itself, runs on a copy from here on. The original
+  # is promoted only after the gates and stays untouched until then.
+  local _sbx="" _newargs
+  if _selfedit_ziel "$name" "$args"; then
+    if ! _sbx="$(_selfedit_anlegen)"; then
+      echo "Self-edit: sandbox cannot be created — original stays unchanged."
+      return 1
+    fi
+    _newargs="$(jq --arg p "$_sbx/tree/lex" '.path=$p' <<< "$args" 2>/dev/null)"
+    if [[ -z "$_newargs" ]]; then
+      rm -rf -- "$_sbx"; _sbx=""
+      echo "Self-edit: path redirection failed — original stays unchanged."
+      return 1
+    fi
+    args="$_newargs"
+    log "selfedit: sandbox $_sbx (target would be $_lex_script)"
   fi
   # Span-level log (2026-09-30): the start stamp is taken before the case,
   # $? right after `esac` is the exit status of the branch that just ran.
@@ -3669,6 +3990,21 @@ dispatch_tool() {
   esac
   # Span: duration + ok. `$?` after the case is the tool's own exit status.
   _rc=$?
+  # Self-edit sandbox: the edit ran on the copy → now the gates run,
+  # promotion only on green. If the edit itself failed
+  # (_rc ≠ 0), the copy is discarded and the original never touched.
+  if [[ -n "${_sbx:-}" ]]; then
+    if (( _rc == 0 )); then
+      if ! _selfedit_pruefen "$_sbx"; then
+        _rc=1
+      elif ! _selfedit_uebernehmen "$_sbx"; then
+        _rc=1
+      fi
+    fi
+    rm -rf -- "$_sbx"
+    _sbx=""
+    log "selfedit: sandbox finished (rc=$_rc)"
+  fi
   _t1="$(_ms_now)"
   if (( _rc == 0 )); then _ok=true; else _ok=false; fi
   span_log "$name" "$args" $(( _t1 - _t0 )) "$_ok"
@@ -3698,6 +4034,7 @@ _K_CYANB=""
 _K_CYAND=""
 _K_BLUEB=""
 _K_BOLD=""
+
 _palette_init() {
   [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]] && return 0
   _K_RST=$'\033[0m'
@@ -3743,7 +4080,6 @@ _hint_args() {
   # O2 (audit 2026-10-08): characters instead of bytes — `%.70s` truncated
   # BYTES and could end in the middle of a multi-byte character (100x€ = 300
   # B -> before only 23 full chars + 1 half). With a UTF-8 locale ${v:0:N}
-  # counts characters.
   printf '%s' "${v:0:70}"
 }
 
@@ -3752,6 +4088,7 @@ _hint_args() {
 # so pipes and tests stay unchanged.
 _spin_pid=""
 _spin_flag=""
+
 _spin_start() {
   _trace_enabled || return 0
   # Only repaint on a real TTY (P3, live test 2026-09-29): the \r-\x1b[2K-
@@ -3988,7 +4325,6 @@ _md_render() {
     # line -> cells (drop leading/trailing pipe, trim cells).
     # O1 (2026-10-07): `\|` is an escape pipe (GFM: also inside `code`),
     # not a column separator — protect with \001 before the split,
-    # restore afterwards.
     function cells(row, a,   r, n, i) {
       r = row
       sub(/^[ \t]*\|/, "", r)
@@ -4272,6 +4608,7 @@ _compact_run() {
   # where the AnonOps case showed up. Independent of auto-compaction
   # (LEX_COMPACT=off must not silence the warning): once per "nearly full"
   # period, so the turn is not spammed.
+  # is spammed.
   if [[ "$force" != "force" ]]; then
     local warn_thr=$(( _ctx_limit * 85 / 100 ))
     if (( est_before > warn_thr )); then
@@ -4671,9 +5008,17 @@ run_turn() {
   # Signature/window live only inside the turn.
   local _loop_last_sig="" _loop_run=0 _loop_hits=0 _loop_violation=0 _loop_sig=""
   local _silent_run=0 _silent_hits=0
+  # Graceful end + failure streak (finding 2026-10-12): the hard guard aborts
+  # used to throw back rc 1 WITHOUT a single answer line (dead end) —
+  # now: forced final round without tools, then a safety net
+  # with partial text. _fail_streak counts bash calls with rc≠0 without ONE success.
+  local _guard_final=0 _guard_reason="" _fail_streak=0
   turn_t0="$(_now)"
   _turn_active=1
   _turn_aborted=""
+  # Residual state from a possibly squashed previous round (final round):
+  # Tools must never stay disabled beyond the turn.
+  _tools_off=""
   # Compaction (step 42) ONLY here: before the user-append the
   # tool pairs are always closed; auto = threshold as gate, silent.
   _compact_run
@@ -4740,10 +5085,30 @@ run_turn() {
     reasoning="$(jq -r '.choices[0].message.reasoning_content // empty' <<< "$response" 2>/dev/null)"
     _last_reasoning_chars="${#reasoning}"
     _trace_reasoning "$reasoning"
-    tool_calls_json="$(jq -c '.choices[0].message.tool_calls // []' <<< "$response" 2>/dev/null)"
-    tool_count="$(jq 'length' <<< "$tool_calls_json" 2>/dev/null || echo 0)"
-    local finish_reason
+    local finish_reason _tc_raw _tc_bad
     finish_reason="$(jq -r '.choices[0].finish_reason // empty' <<< "$response" 2>/dev/null)"
+    tool_calls_json="$(jq -c '.choices[0].message.tool_calls // []' <<< "$response" 2>/dev/null)"
+    # Sanitization (finding 2026-10-10): truncated function.arguments
+    # (finish_reason=length) are invalid JSON and would poison the history
+    # poison (server parses them → HTTP-500 loop until hard abort).
+    # Broken ones out, before tool_count is counted and assistant_msg is built.
+    _tc_raw="$tool_calls_json"
+    tool_calls_json="$(_tc_sanitize "$tool_calls_json")"
+    _tc_bad=$(( $(jq 'length' <<< "$_tc_raw" 2>/dev/null || echo 0) - $(jq 'length' <<< "$tool_calls_json" 2>/dev/null || echo 0) ))
+    if (( _tc_bad > 0 )); then
+      echo "⚠️  $_tc_bad tool call(s) with invalid arguments discarded (truncated/broken JSON)." >&2
+      log "run_turn: $_tc_bad broken tool_calls removed (finish=${finish_reason:-?}, raw=${#_tc_raw}B, clean=${#tool_calls_json}B)"
+    fi
+    tool_count="$(jq 'length' <<< "$tool_calls_json" 2>/dev/null || echo 0)"
+    # Final round (guard): tools are off — if the server
+    # still delivers tool_calls, they are discarded here, BEFORE the
+    # assistant message is built: non-appended IDs mean no
+    # unanswered tool_messages, the context stays protocol-conform.
+    if (( _guard_final == 1 )) && (( tool_count > 0 )); then
+      log "run_turn: final round — ${tool_count} tool_call(s) discarded"
+      tool_calls_json='[]'
+      tool_count=0
+    fi
     local assistant_msg amtf ttf amrc
     amtf="$(mktemp)" && ttf="$(mktemp)" || { rm -f "${amtf:-}" "${ttf:-}"; log "run_turn: temp file not creatable"; return 1; }
     printf '%s' "$content" > "$amtf" 2>/dev/null && printf '%s' "$tool_calls_json" > "$ttf" 2>/dev/null || {
@@ -4947,7 +5312,31 @@ run_turn() {
         fi
         (( _loop_run >= 3 )) && _loop_violation=1
       fi
+      # Failure streak (finding 2026-10-12): rc≠0 series ACROSS — the case
+      # that exact repetition detection does NOT catch (args vary,
+      # the failure stays the same; "different method" instead of "different number").
+      # Only bash carries the rc visibly in the result — "Exit code:" is only
+      # printed at rc≠0 (tool_bash), so the pattern is unambiguous.
+      if [[ "$name" == "bash" && "$result" == "Exit code: "* ]]; then
+        _fail_streak=$(( _fail_streak + 1 ))
+      else
+        _fail_streak=0
+      fi
     done
+    # Failure-streak nudge (research fallback ladder: "change the method,
+    # instead of varying the parameters"): ≥6 bash failures in a row without ONE
+    # success → soft nudge like with the fail memory, no abort.
+    # Priority: an ongoing repetition violation takes precedence (continuet).
+    if [[ "${LEX_LOOP_GUARD:-on}" != "off" ]] && (( _fail_streak >= 6 )); then
+      echo "⚠️  failure streak: $_fail_streak bash calls in a row with rc≠0 — nudge." >&2
+      log "run_turn: fail-streak nudge streak=$_fail_streak"
+      session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+        --argjson streak "$_fail_streak" '{type:"fail_streak",ts:$ts,streak:$streak,action:"nudge"}')"
+      _fail_streak=0
+      append_message "user" "Six bash calls in a row ended in an error (rc≠0): the same method with slightly changed parameters is not progress. Change the method or ask the human before you keep varying."
+      _rb_override=0
+      continue
+    fi
     # Violation handling: soft (nudge, turn continues) → hard (rc 1).
     if (( _loop_violation )); then
       _loop_violation=0
@@ -4968,12 +5357,30 @@ run_turn() {
         _rb_override=0
         continue
       fi
+      if (( _guard_final == 0 )); then
+        # Graceful (finding 2026-10-12): the hard abort used to throw rc 1
+        # back WITHOUT ANY answer line — the user saw nothing of the state
+        # (dead end). Now: one last round WITHOUT tools, in which the
+        # state is force-requested; empty answer → the existing
+        # nudge chain; everything fails → safety net after the loop.
+        _guard_final=1
+        echo "❌ Fail memory: ${loop_tool:-Tool} identical again — forcing final answer without tools (LEX_LOOP_GUARD=off switches this off)." >&2
+        log "run_turn: loop-guard hard → final round without tools tools=${loop_tool:-?} hits=$_loop_hits"
+        session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+          --arg tools "${loop_tool:-}" --argjson hits "$_loop_hits" \
+          '{type:"loop_guard",ts:$ts,tools:$tools,action:"final",hits:$hits}')"
+        append_message "user" "Stop signal: the same tool chain ran in circles unsuccessfully several times. Answer NOW without further tool calls, at most 5 sentences: what is the current state, what exists as a result, what remains open?"
+        _tools_off=1
+        _rb_override=0
+        continue
+      fi
       echo "❌ Fail memory: ${loop_tool:-tool} identical again — aborting (LEX_LOOP_GUARD=off switches this off)." >&2
       log "run_turn: loop-guard hard tools=${loop_tool:-?} hits=$_loop_hits"
       session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
         --arg tools "${loop_tool:-}" --argjson hits "$_loop_hits" \
         '{type:"loop_guard",ts:$ts,tools:$tools,action:"abort",hits:$hits}')"
-      return 1
+      _guard_reason="fail memory hard"
+      break
     fi
     # Silent-turn guard (2026-10-07, §7 #62): the fail memory only sees
     # identical name|args|result signatures — the adwt-B2 finding had 195
@@ -5000,15 +5407,47 @@ run_turn() {
           _rb_override=0
           continue
         fi
+        if (( _guard_final == 0 )); then
+          # Graceful as in the fail memory (finding 2026-10-12): no answer
+          # is the worst outcome — one last round without tools
+          # forces the state, the safety net catches afterwards.
+          _guard_final=1
+          echo "❌ Silent guard: again ${_silent_turns} tool turns without any intermediate statement — forcing final answer without tools (LEX_SILENT_TURNS=0 switches this off)." >&2
+          log "run_turn: silent-guard hard → final round without tools streak=${_silent_turns} hits=$_silent_hits"
+          session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+            --argjson streak "$_silent_turns" --argjson hits "$_silent_hits" \
+            '{type:"silent_guard",ts:$ts,streak:$streak,hits:$hits,action:"final"}')"
+          append_message "user" "Stop signal: ${_silent_turns} tool rounds without any visible intermediate statement. Answer NOW without further tool calls, at most 5 sentences: what is done, what is open, what is the result?"
+          _tools_off=1
+          _rb_override=0
+          continue
+        fi
         echo "❌ Silent-Guard: again ${_silent_turns} tool turns without any statement — aborting (LEX_SILENT_TURNS=0 switches this off)." >&2
         log "run_turn: silent-guard hard streak=${_silent_turns} hits=$_silent_hits"
         session_write "$(jq -c -n --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z)" \
           --argjson streak "$_silent_turns" --argjson hits "$_silent_hits" \
           '{type:"silent_guard",ts:$ts,streak:$streak,hits:$hits,action:"abort"}')"
-        return 1
+        _guard_reason="silent guard hard"
+        break
       fi
     fi
   done
+  # Graceful end (finding 2026-10-12): the forced final round above
+  # renders regularly; this path is the safety net in case a second
+  # hard hit leaves the loop — NO dead rc 1 without output.
+  if [[ -n "${_guard_reason:-}" ]]; then
+    _tools_off=""
+    if [[ -n "${pending:-}" ]]; then
+      echo "⚠️  ${_guard_reason} — show the state of the last answer." >&2
+      _trace_hud "$turn_t0"
+      _trace_rule
+      render_markdown <<< "$pending"
+      return 0
+    fi
+    echo "⚠️  ${_guard_reason} — abort without usable answer text." >&2
+    log "run_turn: ${_guard_reason} without content — rc 1"
+    return 1
+  fi
 }
 
 # Large tool results are not truncated but stored in full: the context
@@ -5228,9 +5667,6 @@ agent_loop() {
       # -p = prompt as readline argument (offset see note before while).
       # Raw colour escapes, NO \[..\] masks — bash masks them itself.
       # Lurk mode (fix 2026-10-08, user report "jumps back while typing and
-      # overwrites every few seconds"): the watcher tick does NOT run as
-      # read -t in the input loop any more — the timeout discarded the keys
-      # typed so far (repro: "abc" → tick → only "def" arrived, tmux).
       # Instead a background ticker (_lurk_ticker_start) feeding a pending
       # file; alerts are printed BEFORE the next prompt
       # (_lurk_pending_flush) — the input stays intact.
@@ -5358,6 +5794,8 @@ EOF
 # Replace slot 0 of the running context — shared path of the prompt modes
 # /lexpen and /lexlurk. _system_prompt must already be set.
 # $1 = mode name for the session record (lexpen|lurk|default).
+# /lexpen. _system_prompt must already be set.
+# $1 = mode name for the session record (lexpen|default).
 _swap_slot0() {
   local mode="$1" sys stf new
   if ! jq -e '((.[0].role // "") == "system")' <<< "$_messages" >/dev/null 2>&1; then
@@ -5388,6 +5826,44 @@ _swap_slot0() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Tor stealth (built 2026-10-10, repaired 2026-10-10):
+# The first build left only the CALL in `cmd_lexpen` — the
+# definitions were missing because the python replacement run aborted at "OLD ON-END NOT
+# FOUND" with exit(1), BEFORE the file was written; after that
+# only a sed moved the call in. Finding: "_tor_stealth_start: command
+# not found" (line 5525), `_tor_stealth_stop` was missing identically in the
+# off-branch.
+# Path: do not rebuild, use the existing stealth-observe.sh --start/--stop
+# (the exit check runs via proxychains; the inner curl path of the raw version
+# would have reported the REAL IP as "obfuscated").
+# Gates: LEX_TOR=0 switches off, LEX_MOCK (test path) switches off — otherwise
+# tests would trigger network access on /lexpen switch.
+_tor_stealth_start() {
+  [[ "${LEX_TOR:-1}" == "0" || -n "${LEX_MOCK:-}" ]] && return 0
+  local tool="${_htools_dir:-/home/chaos/H-Tools}/stealth-observe.sh"
+  if [[ ! -x "$tool" ]]; then
+    echo "⚠ Tor stealth: $tool missing/not executable — Tor stays untouched."
+    return 0
+  fi
+  # --start is idempotent: Tor running → only exit check (~1 s), otherwise
+  # sudo systemctl start tor (the password prompt goes to the terminal, not through
+  # the tool_bash sudo gate — deliberate, see session build 2026-10-10).
+  "$tool" --start
+}
+
+_tor_stealth_stop() {
+  [[ "${LEX_TOR:-1}" == "0" || -n "${LEX_MOCK:-}" ]] && return 0
+  # Nothing to do when Tor is off anyway — /lexpen off must not ask sudo.
+  pgrep -x tor >/dev/null 2>&1 || return 0
+  local tool="${_htools_dir:-/home/chaos/H-Tools}/stealth-observe.sh"
+  if [[ ! -x "$tool" ]]; then
+    echo "⚠ Tor stealth: $tool missing/not executable — Tor keeps running."
+    return 0
+  fi
+  "$tool" --stop
+}
+
 cmd_lexpen() {
   local what="${1:-on}" f="${_lex_home}/prompts/lexpen.md" content
   case "$what" in
@@ -5398,6 +5874,13 @@ cmd_lexpen() {
       fi
       _system_prompt="$_system_prompt_default"
       _lexpen_active=""
+      _tor_stealth_stop
+      # drop the sudo ticket (user decision 2026-10-12): the
+      # passwordless window belongs to /lexpen — afterwards back to normal-
+      # operation (password at the terminal, y/N gate). Never in mock mode (tests).
+      if [[ -z "${LEX_MOCK:-}" ]] && command -v sudo >/dev/null 2>&1; then
+        sudo -k 2>/dev/null || true
+      fi
       ;;
     on|an|1|"")
       if [[ -n "${_lexpen_active:-}" ]]; then
@@ -5534,6 +6017,7 @@ LEXPEN_EOF
         _lurk_ticker_stop
         echo "  Note: /lexlurk is now off (slot 0 belongs to /lexpen)."
       fi
+      _tor_stealth_start
       ;;
     *)
       echo "Usage: /lexpen [off] · /lex = back to the original prompt" >&2
@@ -5544,6 +6028,19 @@ LEXPEN_EOF
   if [[ -n "${_lexpen_active:-}" ]]; then
     echo '✓ System prompt: Lex persona (senior engineer style) active — '"$f"
     echo '  Style: English · title block · "Chief" · ✦ made by @Lex ✦ · /lex = back.'
+    # fetch the sudo ticket ONCE (user decision 2026-10-12: "1× at
+    # /lexpen on"): the password prompt points to the controlling TTY and the
+    # password goes DIRECTLY to sudo (step-57 rule: never through lex).
+    # Without TTY/aborted lexpen stays on — the gate asks honestly on the first
+    # root command. Never in mock mode (otherwise tests would hang at
+    # password line).
+    if [[ "${_sudo:-1}" == "1" && -z "${LEX_MOCK:-}" ]] && ! _sudo_ticket_valid; then
+      if _sudo_ask "/lexpen (root mode)"; then
+        log "sudo: ticket fetched at /lexpen on (1× session release)"
+      else
+        echo '  Note: sudo ticket not fetched — the password prompt appears at the terminal on the first root command.'
+      fi
+    fi
   else
     echo "✓ System prompt: original (English) active again."
   fi
@@ -5689,7 +6186,9 @@ LURK_EOF
 # IMPORTANT: the lock sits in the current process (not `$(…)` — there the fd
 # would close again with the subshell immediately and the lock would be
 # worthless).
-_lurk_pending_lock() { # $1 = file -> fd in $_lp_fd (empty = without lock)
+# (renamed to the generic _pending_lock/_pending_unlock in the DE round —
+# same implementation, general helper.)
+_pending_lock() { # $1 = file → fd in $_lp_fd (empty = without lock)
   _lp_fd=""
   command -v flock >/dev/null 2>&1 || return 0
   # Finding 2026-10-08: `exec` WITHOUT command redirects `2>/dev/null` too
@@ -5700,7 +6199,7 @@ _lurk_pending_lock() { # $1 = file -> fd in $_lp_fd (empty = without lock)
   flock -x "$_lp_fd" 2>/dev/null || { { exec {_lp_fd}>&-; } 2>/dev/null; _lp_fd=""; }
 }
 
-_lurk_pending_unlock() {
+_pending_unlock() {
   [[ -n "${_lp_fd:-}" ]] || return 0
   flock -u "$_lp_fd" 2>/dev/null || true
   { exec {_lp_fd}>&-; } 2>/dev/null || true
@@ -5712,21 +6211,21 @@ _lurk_pending_add() { # $1 = new alert count -> raise counter (locking)
   [[ "$n" =~ ^[0-9]+$ ]] || return 0
   (( n > 0 )) || return 0
   mkdir -p "${_lex_home}/lurk" 2>/dev/null || return 0
-  _lurk_pending_lock "$f"
+  _pending_lock "$f"
   cur="$(cat "$f" 2>/dev/null)"
   [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
   printf '%s\n' "$(( cur + n ))" > "$f"
-  _lurk_pending_unlock
+  _pending_unlock
   return 0
 }
 
 _lurk_pending_drain() { # output counter AND empty the file (locking)
   local f="${_lex_home}/lurk/pending" n
   [[ -f "$f" ]] || { printf '0\n'; return 0; }
-  _lurk_pending_lock "$f"
+  _pending_lock "$f"
   n="$(cat "$f" 2>/dev/null)"
   rm -f "$f"
-  _lurk_pending_unlock
+  _pending_unlock
   [[ "$n" =~ ^[0-9]+$ ]] || n=0
   printf '%s\n' "$n"
 }

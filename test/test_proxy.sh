@@ -143,7 +143,7 @@ if (( busy == 0 )); then pass "ports free"; fi
 if bash -n "$PROXY"; then pass "syntax"; else fail "syntax"; fi
 
 # 2. start the fake upstream
-printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Taugt.","reasoning_content":"thinking briefly","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":11}}' \
+printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"thinking briefly","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":11}}' \
   > "$TMP/responses.json"
 FAKE_PID="$("$SCRIPT_DIR/fake_server.sh" "$FAKE_PORT" "$TMP/responses.json" 2>/dev/null)" || FAKE_PID=""
 if [[ -n "$FAKE_PID" ]]; then pass "fake upstream started ($FAKE_PORT)"; else fail "fake upstream started"; fi
@@ -172,7 +172,7 @@ code="$(curl -sS --max-time 30 -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/com
         -H 'Content-Type: application/json' -d @"$BODY" -o "$TMP/resp.json" -w '%{http_code}')"
 if [[ "$code" == "200" ]]; then pass "pass-through (HTTP 200, $blen byte body)"; else fail "pass-through (HTTP $code)"; fi
 content="$(jq -r '.choices[0].message.content // ""' "$TMP/resp.json" 2>/dev/null || printf '')"
-if [[ "$content" == "Taugt." ]]; then pass "upstream answer came back unchanged"; else fail "answer: $content"; fi
+if [[ "$content" == "Works." ]]; then pass "upstream answer came back unchanged"; else fail "answer: $content"; fi
 if jq -e . >/dev/null 2>&1 "$TMP/resp.json"; then pass "response is valid JSON"; else fail "response is valid JSON"; fi
 
 # 5. log written?
@@ -308,7 +308,6 @@ fi
 
 # 16. audit M7: bind proof — helper freshly extracted from the file (without
 #     releasing the dispatcher of the proxy scripts), checked against a
-#     running proxy
 eval "$(sed -n '/^_port_owned_by()/,/^}/p' "$PROXY")"
 out="$(LEX_PROXY_UPSTREAM="http://127.0.0.1:$FAKE_PORT" LEX_PROXY_DIR="$TMP/.proxy6" \
        "$PROXY" start "$BIND_PORT" 2>&1)"
@@ -405,7 +404,6 @@ fi
 # LEX_PROXY_DIR explicitly ($TMP/.proxy8): without it DIR sits at $PWD/.proxy,
 # the block would have written the lock into the repo. Port ONLY from the env —
 # start without a port argument, otherwise the argument is checked instead of
-# the env variable.
 P8="$TMP/.proxy8"
 out="$(LEX_PROXY_DIR="$P8" LEX_PROXY_PORT="$M7_PORT" "$PROXY" start 2>&1)"; rc=$?
 sleep 0.2
@@ -417,7 +415,6 @@ LEX_PROXY_DIR="$P8" "$PROXY" stop >/dev/null 2>&1
 sleep 0.2
 # Port taken: FOREIGN listener. An own proxy would be intercepted before the
 # ss check already in _running (different message) — exactly this ss path is
-# what M7 checks.
 ncat --listen 127.0.0.1 "$M7B_PORT" -k </dev/null >/dev/null 2>&1 &
 FR8_PID=$!
 for _ in $(seq 1 30); do

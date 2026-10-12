@@ -134,6 +134,25 @@ else
   FAIL=1
 fi
 
+# 16b. pipefail (finding 2026-10-12): the rc is that of the CHAIN, not of
+#      the last link — otherwise `make … | tail` reports rc 0 even for a
+#      failed link and the model writes "installed"
+#      anyway.
+out="$(tool_bash "false | cat")"
+if [[ "$out" == *"Exit code: 1"* ]]; then
+  printf '  [PASS] bash (pipefail: rc of the chain)\n'
+else
+  printf '  [FAIL] bash (pipefail: rc of the chain): %q\n' "$out" >&2
+  FAIL=1
+fi
+out="$(tool_bash "true | cat")"
+if [[ "$out" != *"Exit code"* ]]; then
+  printf '  [PASS] bash (pipefail: success stays rc-free)\n'
+else
+  printf '  [FAIL] bash (pipefail: success stays rc-free): %q\n' "$out" >&2
+  FAIL=1
+fi
+
 # 17. tool_bash: stdin is ignored (</dev/null) — otherwise `cat`/`read` hangs on the terminal
 out="$(printf 'x\n' | tool_bash "cat")"
 assert "bash (ignores stdin)" "" "$out"

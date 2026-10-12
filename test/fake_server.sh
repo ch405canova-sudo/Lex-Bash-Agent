@@ -16,7 +16,7 @@
 #   used per POST request. If empty → DEFAULT response.
 #   .sse ending: the file is delivered as a WHOLE SSE stream (not consumed)
 #   — that is how test_sse.sh tests the streaming path of call_api().
-#   First line „STATUS:500|{json}": own HTTP status code.
+#   First line "STATUS:500|{json}": own HTTP status code.
 #
 # IMPORTANT (contracts that were broken):
 #   - `ncat --listen` accepts EXACTLY ONE connection WITHOUT `-k` and
@@ -53,7 +53,7 @@ if [[ -z "${SCRIPT_FILE:-}" ]]; then
 fi
 [[ -f "$SCRIPT_FILE" ]] || { echo "Error: script file '$SCRIPT_FILE' not found." >&2; exit 1; }
 
-DEFAULT_RESP='{"choices":[{"index":0,"message":{"role":"assistant","content":"Taugt.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
+DEFAULT_RESP='{"choices":[{"index":0,"message":{"role":"assistant","content":"Works.","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}],"usage":{"total_tokens":10}}'
 
 BASE_DIR="$(dirname "$SCRIPT_FILE")"
 HANDLER="$BASE_DIR/.fake_openai_handler.$PORT.sh"
@@ -175,7 +175,7 @@ _pid_alive() {
 
 # True if EXACTLY $pid listens on 127.0.0.1:$port. Without ss only the
 # weakened variant remains (lives + port open) — the normal case on all
-# target platforms is ss (lurk_watch.sh needs it anyway).
+# every target platform has ss.
 _port_owned_by() {
   local port="$1" pid="$2"
   if command -v ss >/dev/null 2>&1; then

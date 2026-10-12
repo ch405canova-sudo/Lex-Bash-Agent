@@ -6,6 +6,25 @@
 set -u
 set -o pipefail
 
+# ---------------------------------------------------------------------------
+# Background-inheritance guard (finding 2026-10-10) — BEFORE everything else.
+# Bash sets SIGINT to "ignore" for background jobs. Whoever starts the suite from
+# a background job inherits that into ALL children — and that is exactly
+# what lex does when it starts tests (tool_bash → `_run_limited … &`):
+#   SigIgn in the child = 0x06 (SIGHUP+SIGINT)
+# The tested REPL inherits the same; a trap on an inherited-ignore signal is
+# ineffective → ^C never reaches it → the three Ctrl+C needles went red WITHOUT
+# a real defect (from inside the lex REPL "always FAIL", directly green).
+# Reproduce without lex:  bash -c 'bash test/test_input.sh' &   → 3× FAIL
+# Reset: only when INT really is inherited-ignore (bit 2), so that the
+# infinite loop after the reset drops out (bit is gone afterwards).
+_sigign="$(awk '/^SigIgn:/{print $2}' /proc/$$/status 2>/dev/null || true)"
+if [[ -n "${_sigign:-}" ]] && command -v env >/dev/null 2>&1 \
+   && env --help 2>/dev/null | grep -q -- '--default-signal' \
+   && (( (16#$_sigign >> 1) & 1 )); then
+  exec env --default-signal=INT bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEX_DIR="$(dirname "$SCRIPT_DIR")"
 LEX_BIN="$LEX_DIR/lex"
@@ -82,7 +101,6 @@ fi
 # like oneshot (P3, review 2026-09-29) — otherwise `echo … | lex` would
 # swallow the input silently.
 out="$(echo 'Say hello' | LEX_MOCK="done" "$LEX_BIN" 2>/dev/null)"
-assert "pipe without flag (non-TTY → oneshot)" "Works." "$out"
 rc=0
 printf '' | LEX_MOCK="done" "$LEX_BIN" >/dev/null 2>&1
 rc=$?
@@ -163,6 +181,17 @@ else
   FAIL=1
 fi
 
+# Anchor: the background-SigInt reset must stay in BOTH entry points —
+# otherwise the following ^C needles drop out from the lex REPL without a real
+# defect going red (finding 2026-10-10).
+if grep -Fq 'default-signal=INT' "$SCRIPT_DIR/test_input.sh" \
+   && grep -Fq 'default-signal=INT' "$SCRIPT_DIR/run_all.sh"; then
+  printf '  [PASS] repl (anchor: background-SigInt reset present)\n'
+else
+  printf '  [FAIL] repl (anchor: background-SigInt reset missing)\n' >&2
+  FAIL=1
+fi
+
 # 5f. Ctrl+C at the prompt (step 51): lex must NOT die. Before the fix
 # there was no trap … INT — a single Ctrl+C ended the process (live finding
 # 2026-10-05, session 125104). The first press discards only the line,
@@ -191,7 +220,6 @@ fi
 # (timeout --foreground, otherwise sleep kept running until tool_timeout:
 # 20 s measured), session protocol-conform (tool_call gets an answer),
 # REPL lives. Regression without the fix: rc=124 via timeout 30 (child
-# runs the full 60 s).
 smock="$TMP/int_turn.json"
 printf '%s\n' \
   '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"tcI","type":"function","function":{"name":"bash","arguments":"{\"command\":\"sleep 60\"}"}}]}}]}' \

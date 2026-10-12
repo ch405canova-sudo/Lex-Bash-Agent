@@ -197,20 +197,35 @@ assert "N2 (loop_guard nudge record names the counter)" "3" \
   "$(jq -r 'select(.type=="loop_guard" and .action=="nudge") | .run' \
     "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
 
-# hard: six identical batches → after the soft stage abort with rc 1
+# hard: six identical batches → nudge, then forced final round
+#      WITHOUT tools (graceful end, finding 2026-10-12). Before: dead rc 1
+#      without a single answer line. Now: mock queue exhausted → "Works.".
 same t1 > "$mock"; same t2 >> "$mock"; same t3 >> "$mock"
 same t4 >> "$mock"; same t5 >> "$mock"; same t6 >> "$mock"
 _mock_file="$mock"
 run_turn "six times the same" > "$TMP/out2.txt" 2> "$TMP/err2.txt"
 rc=$?
 err2="$(cat "$TMP/err2.txt")"
-if (( rc == 1 )); then
-  printf '  [PASS] loop-guard hard (rc=1)\n'
-else
-  printf '  [FAIL] loop-guard hard (rc=%s)\n' "$rc" >&2
-  FAIL=1
-fi
-assert "loop-guard hard (message)" "1" "$([[ "$err2" == *"identical again"* ]] && echo 1 || echo 0)"
+assert "loop-guard hard (rc=0 instead of dead abort)" "0" "$rc"
+assert "loop-guard hard (final answer arrives)" "Works." "$(cat "$TMP/out2.txt")"
+assert "loop-guard hard (message names the forced final)" "1" \
+  "$([[ "$err2" == *"identical again"* && "$err2" == *"forcing final answer without tools"* ]] && echo 1 || echo 0)"
+assert "loop-guard hard (session record action=final)" "final" \
+  "$(jq -r 'select(.type=="loop_guard" and .action=="final") | .action' \
+    "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
+# tools reset at turn START: the final round must not carry the shutdown
+# into the next round (otherwise the model reports tool_calls that are
+# silently discarded — until max_turns). Without reset this is 1.
+_mock_file="$mock"
+run_turn "Reset-Check" >/dev/null 2>&1
+assert "loop-guard (tools reset at turn start)" "0" \
+  "$([[ -z "${_tools_off:-}" ]] && echo 0 || echo 1)"
+# safety net static: a second hard hit leaves with break and
+# renders the partial text afterwards — never again a blank rc 1 pair.
+assert "loop-guard (safety net: base variable)" "1" \
+  "$(grep -c '_guard_reason="fail memory hard"' "$LEX_DIR/lex")"
+assert "loop-guard (safety net: no return 1 left in the hard branch)" "0" \
+  "$(awk '/forcing final answer without tools/,/^    fi$/' "$LEX_DIR/lex" | grep -c 'return 1')"
 
 # 11b. Silent-turn guard (2026-10-07, §7 #62): 12 tool turns in a row
 #      WITHOUT a visible statement → nudge, second time abort.
@@ -238,19 +253,19 @@ assert "silent-guard (not the fail memory)" "0" "$([[ "$err_s" == *"Fail memory"
 _srec="$(jq -r 'select(.type=="silent_guard") | .action' "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
 assert "silent-guard (session record nudge)" "nudge" "$_srec"
 
-# hard: another 12 silent turns after the nudge → rc 1
+# hard: after the nudge another 12 silent turns → forced final round
+#       (graceful end) instead of dead rc 1; mock queue exhausted → "Works.".
 mock="$TMP/silent2.json"
 for i in $(seq 1 24); do silent "h$i" >> "$mock"; done
 _mock_file="$mock"
-run_turn "twenty-four silent turns" >/dev/null 2> "$TMP/err_s2.txt"
+run_turn "twenty-four silent turns" > "$TMP/out_s2.txt" 2> "$TMP/err_s2.txt"
 rc=$?
-if (( rc == 1 )); then
-  printf '  [PASS] silent-guard hard (rc=1)\n'
-else
-  printf '  [FAIL] silent-guard hard (rc=%s)\n' "$rc" >&2
-  FAIL=1
-fi
-assert "silent-guard hard (message)" "1" "$([[ "$(cat "$TMP/err_s2.txt")" == *"Silent-Guard: again"* ]] && echo 1 || echo 0)"
+assert "silent-guard hard (rc=0 instead of dead abort)" "0" "$rc"
+assert "silent-guard hard (final answer arrives)" "Works." "$(cat "$TMP/out_s2.txt")"
+assert "silent-guard hard (message names the forced final)" "1" \
+  "$([[ "$(cat "$TMP/err_s2.txt")" == *"Silent guard: again"* && "$(cat "$TMP/err_s2.txt")" == *"forcing final answer without tools"* ]] && echo 1 || echo 0)"
+assert "silent-guard (session record action=final)" "final" \
+  "$(jq -r 'select(.type=="silent_guard") | .action' "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
 
 # Reset: one turn WITH visible text (besides the tools) sets the streak to 0
 mock="$TMP/silent3.json"
@@ -264,6 +279,27 @@ rc=$?
 assert "silent-guard (reset: rc=0)" "0" "$rc"
 assert "silent-guard (reset: no nudge)" "0" "$([[ "$(cat "$TMP/err_s3.txt")" == *"Silent-Guard"* ]] && echo 1 || echo 0)"
 assert "silent-guard (reset: final answer)" "Done." "$(cat "$TMP/out_s3.txt")"
+
+# failure streak (finding 2026-10-12): six bash failures IN A ROW with varying
+# args — the exact repetition guard stays quiet (args differ),
+# the streak still counts: "different number, same
+# wrong method" → soft nudge, no abort.
+mock="$TMP/fail_streak.json"
+for i in 1 2 3 4 5 6; do
+  printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"fs'$i'","type":"function","function":{"name":"bash","arguments":"{\"command\":\"false # '$i'\"}"}}]}}]}' >> "$mock"
+done
+printf '%s\n' '{"choices":[{"index":0,"message":{"role":"assistant","content":"Found a new approach.","tool_calls":[]}}]}' >> "$mock"
+_mock_file="$mock"
+_max_turns=12
+run_turn "six failures in a row" > "$TMP/out_fs.txt" 2> "$TMP/err_fs.txt"
+rc=$?
+assert "fail-streak (rc=0, nudge instead of abort)" "0" "$rc"
+assert "fail-streak (answer after the nudge)" "Found a new approach." "$(cat "$TMP/out_fs.txt")"
+assert "fail-streak (message names rc≠0)" "1" \
+  "$([[ "$(cat "$TMP/err_fs.txt")" == *"failure streak"* ]] && echo 1 || echo 0)"
+assert "fail-streak (session record)" "nudge" \
+  "$(jq -r 'select(.type=="fail_streak") | .action' "$LEX_HOME"/sessions/*/session.jsonl 2>/dev/null | tail -1)"
+_max_turns=20
 
 # LEX_LOOP_GUARD=off: guard off, the turn runs through to the final answer
 export LEX_LOOP_GUARD=off

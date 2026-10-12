@@ -6,6 +6,66 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
 ## [Unreleased]
 
+### Added 2026-10-12 — Prompt ops rules “Reuse before rebuild” + “Deliver first, refine second” (§7/96)
+
+- **Bullet “Reuse before rebuild”** (both modes): before building, cloning,
+  installing or downloading — check whether it already exists: wiki search,
+  wiki/index.md, WERKSTATT.md and pentest-tools-katalog.md in H-Tools, the
+  running plan, an already cloned repo. No source build where a finished
+  image/repo/wrapper exists; missing pieces get added, not reinvented.
+  Context: HASSH run 1 rebuilt the wrapper although a wiki playbook existed
+  (identical duplicate work); run 3 needed three attempts because of it.
+- **Bullet “Deliver first, refine second”** (both modes): while the core
+  deliverable is missing (skill, playbook, patch, answer) that comes first —
+  even if details still need improvising; name leftovers as open points
+  instead of polishing in the tail. Under context pressure (token HUD >80 %
+  / budget messages) the rule doubles: secure and state the result, then
+  polish — a finished core with gaps beats a perfect part that never ends.
+- Source: meta-finding of the HASSH runs (§7/95): pre-building =
+  tool-selection failure, prompt bias without a reuse rule, budget
+  exhaustion.
+- 3 needles (2× `$_system_prompt`, 1× lexpen source text) → DE suite
+  1027 [PASS] = 1012 single checks, 15/15 green, 88 s.
+
+### Changed 2026-10-12 — /lexpen: sudo scope “lex only, ticket once at on”, NOPASSWD removed (§7/94)
+
+- **NOPASSWD texts removed**: the recommendations added by the fix package
+  (§7/93) (“give the task start NOPASSWD”, gate/preflight hints) are gone.
+  The user decided the scope on 2026-10-12: no global NOPASSWD (applies to
+  all processes), instead **one password fetch at `/lexpen on`**, straight
+  to sudo, nothing stored.
+- **`/lexpen on`** fetches the sudo ticket once — `_sudo_ask` (`LEX_MOCK`
+  guard; `sudo -k` before; the password prompt runs on the controlling TTY
+  of the user’s terminal; without a TTY an honest refusal with
+  instructions). Without a ticket: gate with message, no auto-sudo.
+- **`/lexpen off`**: `sudo -k` at the end (ticket gone), **after** the Tor
+  stop — `stealth-observe.sh --stop` itself calls `sudo systemctl stop tor`.
+- `/etc/sudoers.d/90-chaos` removed again (verified: `sudo -n true` → rc 1).
+- Gate/preflight/task texts without NOPASSWD recommendation; the NOPASSWD
+  needles in the task schema stay served (it is just no longer
+  recommended).
+- Live observation run M1–M8: 53 min, 76 calls, 0 identical duplicates, 0
+  guard records, target hash verified; Ctrl-C behaviour confirmed live.
+
+### Fixed 2026-10-12 — Fix package: research hang + duplicate work (§7/93)
+
+- **sudo context split**: `_task_sudo_preflight` now checks sudo in the
+  TARGET context (setsid subshell with the env of the later task shell)
+  instead of the gate context — fixes M6/M8 (lexpen ticket falsely
+  “missing”, task execution blocked).
+- **/lexpen root gate**: without a sudo ticket no lexpen pass-through —
+  `/lexpen on` fetches the ticket at start (one-shot per session);
+  `LEX_SUDO=0` stays a hard stop.
+- **Loop guard graceful end**: in the last allowed round the tool call
+  still finishes, then the guard stops (instead of a hard cut mid-call);
+  the safety net (8-round maximum) stays.
+- **`pipefail` in `tool_bash`/`task`**: the rc of a chain is the chain’s rc
+  (not the last command’s) — verification evaluation becomes honest.
+- **Verification-goal duty**: the prompt demands a named verification goal
+  (reference value/hash/test) before building; no goal, no done.
+- 128 needles added; DE suite 899 → 991 [PASS] = 976 single checks, 15/15
+  green, 96 s.
+
 ### Added 2026-10-10 — Soul: dynamic personality file (`~/.lex/soul.md`)
 
 - **New `_soul_ex()`** loads `~/.lex/soul.md` into the system prompt on
