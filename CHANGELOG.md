@@ -66,6 +66,155 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
 - 128 needles added; DE suite 899 → 991 [PASS] = 976 single checks, 15/15
   green, 96 s.
 
+### Changed 2026-10-12 — Preferences from `mem/` are injected (the memory store was write-only)
+
+- **Trigger**: the user asked in the lex REPL why the personality he wanted
+  ("feel free to answer humorously and with funny emojis now and then")
+  never reached the prompt. I **independently re-checked** lex's own analysis
+  — all four claims held.
+- **Finding (a class, not a single case)**: the memory store was
+  **write-only**. `setup_messages` built the system prompt only from
+  `_system_prompt` + `_skills_ex` + `_wiki_ex`; `_mem_dir` appeared only in
+  the definition, in the three `mem` tools and in `cmd_status`, where it
+  **counted** the entries for `/status` — and still never read them. **6
+  preferences** lay idle, two of them **security rules**
+  (`sudo-regel--2026-10-03`, `pentest-tool-installation--immer-user-level`),
+  plus working-method rules. Tone was only the most visible of six dead
+  preferences.
+- **Rejected**: tone in `_prompt_style` (hardcoding a changeable preference
+  into the fixed identity), a skill file (duplicates the state and leaves the
+  other five preferences dead), injecting all `mem/` types (`fact`/`memory`/
+  `note` are workshop knowledge and would be injected as noise).
+- **Precondition before any lex code**: `20261009081714-lexpen-modus--humorvoll-antworten.md`
+  limited the tone itself to `/lexpen` and explicitly prescribed a dry,
+  emoji-free tone for the standard mode — injected it would have been
+  **worse than today**, the contradiction would have actively suppressed the
+  tone. Sentence removed (the fact stays as history), new leading preference
+  `ton--geltung--alle-modi`.
+- **Built**: `_mem_pref_ex` (lex:1048) modeled on `_skills_ex` — gate
+  `LEX_MEM_PREF=off`, budgets `LEX_MEM_PREF_MAX`/`LEX_MEM_PREF_TOTAL`
+  (2000/6000) with a **visible** truncation marker (never silently cut),
+  exclusively `type: preference`, order `LC_ALL=C sort -r` (the file name
+  carries `YYYYMMDDHHMMSS` → newest first without parsing the frontmatter),
+  an empty store delivers **no** block. Insertion lex:1098 **directly
+  behind** `_system_prompt` — preferences belong to “who I am”, skills to
+  “how I work”; the order is a weighting. **Contradiction rule as text in
+  the block** (“On contradictions the NEWEST entry wins”) — without it two
+  equally running preferences neutralize each other, and that was exactly the
+  state of the tone entries from 10-02 and 10-09.
+- **Two own errors while building, both the same class**: my first
+  supersession note **quoted** the ban verbatim (the file still contained the
+  ban formula), and the new leading preference repeated the same error in
+  negated form. Both were only found by a final check over all mem files —
+  the needle checks the injected block, not the individual note. Hence the
+  rule in LEX.md §0.1 C: **a revocation note must not repeat the corrected
+  text verbatim when a file is injected**.
+- **Third attempt, different channel position** — hence the broader rule:
+  the first draft of the log entry quoted the ban again, and `wiki/log.md`
+  runs via `_wiki_ex` (**`tail -n 40`**) into the system prompt. The sentence
+  was inside the injected window and stood in the live prompt while `mem/`
+  was already clean — the error propagated into its own antidote. Before
+  every injectable document ask whether its path runs into the prompt at all;
+  `wiki/errors/` does not, the wiki log excerpt does.
+- **Tests**: `test/test_mem_pref.sh` (**28 needles**, 15th runner) incl.
+  integration (`setup_messages` → system prompt via `jq`) — **8/8 mutations
+  detected**, every change checked beforehand against a unique anchor.
+- **Verify**: `bash -n` + `shellcheck -S warning` rc 0 · selfcheck ok ·
+  `run_all.sh` **15/15 = 991 [PASS] = 976 single checks, 0 FAIL, 84 s** (DE
+  suite) · E2E with the **real** `~/.lex/mem` store: tone, sudo and pentest
+  rule in the system prompt, `nmap` facts and the removed ban **not** there.
+  EN suite after the port: 15/15 = **1057 [PASS] = 1042 single checks**.
+- **Side finding**: the `/exit` error after the sandbox build round is **no
+  lex defect**. Mechanism reproduced in two variants — a running `bash` reads
+  the script in blocks and continues at its stored file offset after `/exit`;
+  I had edited `lex` **in place** while a REPL was running. An in-place
+  rewrite breaks the reader, a rename (`mv`) does not — exactly what the
+  self-edit sandbox delivers with its atomic `mv`.
+
+### Changed 2026-10-12 — Self-Edit-Sandbox instead of hook guard (checking instead of forbidding)
+
+- **Trigger**: the user question whether the guard
+  `~/.lex/hooks/pre_tool/50-guard-lex-selfedit`, which is supposed to protect
+  lex from self-repair, could be replaced — “before it actually applies the
+  change, first check it in a sandbox, then apply it”.
+- **Finding**: the guard had the wrong category — it wanted to *prevent* a
+  change, although the risk is that the change *is applied but broken*. The
+  case branch blocked only `write_file`/`edit_file`/`append_file`; the `bash`
+  tool (`tee`, `sed -i`, python) passed unchecked with `exit 0`, and its own
+  message explained the bypass (“deliberately bypass: change via bash-tool”).
+  Proven damage (§7/89): it pushed the agent into the bash+Python
+  read-modify-write detour that aborted before `f.write()` — the guard was the
+  **trigger, not the cause**.
+- **Decision (§2)**: real sandbox beforehand + full suite before promotion,
+  place `dispatch_tool`. Two hard reasons against the first-choice
+  pre/post-hook variant: (a) `LEX_HOOK_ARGS` is only exported as env,
+  `_run_hooks` reads nothing back → a hook **cannot** rewrite the paths, only
+  allow or block; (b) hooks would have 5 s (`LEX_HOOK_TIMEOUT`) against ~87 s
+  of the gates, and `_run_hooks post_tool … || true` swallows every failure
+  silently — the verification would have died hidden, the same false-green
+  class as §7/89. `dispatch_tool` is not bypassable via `LEX_HOOKS=off` — but
+  has **no** timeout budget of its own (`_default_tool_timeout` only acts via
+  `_run_limited` = `tool_bash` and hooks; review-B2 2026-10-12). The gates
+  therefore fetch their deadline themselves via `_run_limited` with
+  `LEX_SELFEDIT_TIMEOUT` (300 s per gate, kill-tree); hangs the suite, it is
+  billed and counts as a failure → fail-closed.
+- **Changed**: four helpers in `lex` (`_selfedit_ziel`, `_selfedit_anlegen`,
+  `_selfedit_pruefen`, `_selfedit_uebernehmen`) + exactly two integration
+  points in `dispatch_tool` (before the `case`: target check and `jq`
+  rewriting of the `path` onto the copy; after `_rc=$?`: gates, then promote
+  or discard, always `rm -rf` of the sandbox). **2 instead of 4 gates** —
+  `selfcheck_lex.sh` already runs `bash -n` and `shellcheck -S warning`
+  internally, a separate gate would be duplication (~4.9 s). Backup
+  `${_lex_home}/lex.bak` before the atomic `mv` (rename in the same
+  directory; the running process keeps its old inode). Escapes
+  `LEX_SELFEDIT_GATES=fast|off` **explicitly state** that the suite did not
+  run — never a silent “green”. **Deliberate gap** as with the old guard:
+  `bash`-, `task`- and `mcp__*` changes bypass the sandbox (guardrail, not a
+  prison).
+- **Review (independent sub-agent, same tags)**: two blockers, both fixed.
+  **B1 — a tilde path slipped silently through the sandbox**: `_selfedit_ziel`
+  canonicalized with bare `readlink -f`, but `safe_path` expands `~` itself;
+  proven with an isolated `$HOME` the target check was rc 1 (no gates, no
+  `lex.bak`) and `tool_write_file` then wrote **directly onto the original**.
+  Fix: `safe_path` **before** `readlink -f` — the same canonicalization the
+  write path uses. **B2 — “`dispatch_tool` has 300 s” was wrong**:
+  `_default_tool_timeout` only acts via `_run_limited`, which is called
+  exclusively by `tool_bash` and the hooks; the gates therefore ran without
+  any deadline. Fix: own deadline per gate via `_run_limited`
+  (`LEX_SELFEDIT_TIMEOUT`, 300 s, kill-tree) **and** the claim replaced at all
+  four places. Also fixed: at `fast`/`off` “gates green” was claimed (now
+  `pruefen` separates the check and `uebernehmen` reports the true mode only
+  after the `mv`), and an exported `LEX_SELFEDIT_GATES` would have made the
+  test runner run falsely red (unset at the start).
+- **Removed**: `50-guard-lex-selfedit` from `pre_tool/` — rollback lies as
+  `~/.lex/hooks/50-guard-lex-selfedit.bak-20261012` (sha `9ea14a2a…`,
+  outside the hook scan path). `post_tool/` untouched (2 hooks).
+- **Fixed (side finding, same error class)**: `tools/selfcheck_lex.sh`
+  reported a log line `log "… $_sbx (target …)"` as “called, but never
+  defined” — **false needle**. `refs_a` hit `$_sbx (`, a variable before the
+  bracket. The author had covered this class for comments (“…otherwise
+  comment hints report a false needle”) but overlooked it in string literals.
+  Fix: `$` removed from the negated character class (`[^A-Za-z0-9_$]`);
+  `$_name(` can never be a call in bash.
+- **Tests**: `test/test_selfedit.sh` (**65 needles**, 14th runner) — target
+  check, staging, green path with gate order, **two** red paths with a
+  byte-identical original, negative gate (foreign target → no sandbox, no
+  gate), both escapes incl. S4 contradiction needles, a section on the real
+  repo tree, **`~`-path regression**, `_rc != 0` branch (edit fails → no
+  gates, original byte-identical), staging error, promotion error. Gates in
+  the fixture tree replaced by stubs that record their naming — proves the
+  **wiring** without ~84 s per run.
+- **Verification**: `bash -n` + `shellcheck -S warning` (incl. test and
+  `selfcheck_lex.sh`) + selfcheck rc 0 ·
+  `run_all.sh` **14/14 = 962 [PASS] = 948 single checks, 0 FAIL, rc 0** (DE
+  suite) · **8/8 mutations detected** (incl. tilde bypass, “always gates
+  green”, `_rc!=0` protection gone) · E2E with the **real** gates both ways:
+  green promoted after 14/14 of the suite (88–90 s, re-run after the deadline
+  rework), red stayed byte-identical on an intentionally broken change (rc 1
+  in 5 s) · precision check against `git archive HEAD`: all 11 existing
+  runners diff 0. EN suite after the port: 15/15 = **1057 [PASS] = 1042
+  single checks**.
+
 ### Added 2026-10-10 — Soul: dynamic personality file (`~/.lex/soul.md`)
 
 - **New `_soul_ex()`** loads `~/.lex/soul.md` into the system prompt on
@@ -84,6 +233,71 @@ versioning: [Semantic Versioning](https://semver.org/lang/en/).
   path for durable personality/tone rules.
 - **`--status`** now shows a `soul` line (path + line count + "dynamic",
   or "missing" hint). Tests +10 (`test_features`).
+
+### Fixed 2026-10-10 — the ^C tests went red without a defect from inside the lex REPL (SIGINT/mock inheritance)
+
+- **User report**: “when lex runs the selfcheck it always gets a fail —
+  because lex is running and Ctrl+C cannot be tested”.
+- **Finding**: the selfcheck itself was red-free; red was `run_all` — and
+  **only** from the lex context: `test_input.sh` green directly, 3× FAIL from
+  every background job (reproduction without lex:
+  `bash -c 'bash test/test_input.sh' &`).
+- **Root cause**: bash sets SIGINT/SIGQUIT to “ignore” for background jobs;
+  `tool_bash` → `_run_limited … &` passes that on to the `script` PTY and the
+  tested REPL (`SigIgn 0x06` vs. `0x00`) — a `trap` on inherited-ignore
+  signals is ineffective. Second finding: inherited `LEX_MOCK` turned three
+  `test_features` needles red (live status + two Tor gates).
+- **Fix**: one-time `exec env --default-signal=INT bash "$0" "$@"` in both
+  test entries (`test_input.sh`, `run_all.sh`, only when SigIgn bit 2 is set
+  → no endless reset) + isolation of the affected needles
+  (`env -u LEX_MOCK -u LEX_MOCK_FILE`, `LEX_MOCK=""` prefix). Production code
+  `_run_limited` stays untouched (step-51 `--foreground`).
+- **Verification**: background job 31/0 (before 27/3) · suite via `tool_bash`
+  with inherited mock **13/13** · directly without and with mock each 13/13 =
+  **896 [PASS]** · lint + selfcheck rc 0.
+
+### Added 2026-10-10 — `tools/selfcheck_lex.sh`: self-check after every self-modification
+
+- **Trigger**: the user question whether the self-edit guard
+  (`50-guard-lex-selfedit`) was to blame for the Tor-stealth defect —
+  **trigger yes, cause no**: the guard forced the replacement run onto
+  bash+Python, which aborted before writing. The actual gap: `bash -n` and
+  `shellcheck` do not report “called, but never defined function” — the
+  error only surfaced at runtime.
+- **`tools/selfcheck_lex.sh`**: `bash -n` + `shellcheck -S warning` +
+  reference-against-definition matching (internal `_name(` calls, comments
+  masked) + a target list of 16 core functions against half-written or
+  damaged scripts. rc 0 = clean, rc 1 = finding with names.
+- **Guard message** (`~/.lex/hooks/pre_tool/50-guard-lex-selfedit`) now names
+  the follow-up duty after every — also bash-based — change: syntax →
+  selfcheck → `run_all` → test evidence instead of claims.
+- **Rules**: `LEX.md` §0.1 C (self-modification/read-modify-write), §0.1 D
+  (selfcheck duty), §0.1 E (DoD checkbox), §7/89.
+- **Tests**: +8 needles in `test_features.sh` (selfcheck on `lex` ok, both
+  break forms rc 1 with names, E2E `/lexpen on→off` without “command not
+  found”) → `test_features` 560, `run_all` **13/13 green**.
+
+### Fixed 2026-10-10 — `/lexpen` started Tor via a function that did not exist
+
+- **Symptom (user report)**: `lex: line 5525: _tor_stealth_start: command
+  not found` on every switch to `/lexpen` — the mode switch itself still went
+  through.
+- **Cause**: half-built Tor-stealth round — the python replacement run
+  aborted at the on-branch with `exit(1)`, **before** the file was written;
+  the two function definitions never reached `lex`, a following `sed` only
+  moved the call. `_tor_stealth_stop` was missing entirely in the off-branch.
+  Details: `wiki/errors/2026-10-10-tor-stealth-aufruf-ohne-funktionsdefinition.md`.
+- **Fix**: `_tor_stealth_start`/`_tor_stealth_stop` defined before
+  `cmd_lexpen` and routed onto the already-built
+  `H-Tools/stealth-observe.sh --start`/`--stop` (exit check via `proxychains`
+  instead of the raw version's curl path, which would have reported the
+  **real** IP as obfuscated); `--stop` only with Tor running (no sudo prompt
+  without need); gates `LEX_TOR=0` + `LEX_MOCK` keep the test path without
+  net/sudo.
+- **Tests**: +10 needles in `test/test_features.sh` (both definitions, the
+  stop call in the off-branch, E2E `/lexpen` without “command not found”,
+  stub call, both gates, warning on a missing script) — `test_features` 552,
+  `run_all` **13/13 green** · `bash -n` + `shellcheck -S warning` rc 0.
 
 ## [0.3.0] — 2026-10-09
 
