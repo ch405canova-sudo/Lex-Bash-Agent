@@ -876,6 +876,25 @@ _wiki_ex() {
 }
 
 # ---------------------------------------------------------------------------
+# Soul (user request 2026-10-10): ${_lex_home}/soul.md — the dynamic
+# personality file. Unlike ~/.lex/mem/ (pull: the model must call mem_search
+# — and demonstrably never does) and unlike the prompt parts anchored in the
+# script, the soul is a separate file the user can edit at any time; lex
+# ALWAYS loads it when building the system prompt — in every mode (standard,
+# /lexpen, /lexlurk) and freshly re-read on every slot-0 switch (mode switch
+# = effective immediately, restart anyway). If the file is missing or empty,
+# the prompt stays unchanged.
+# ---------------------------------------------------------------------------
+_soul_ex() {
+  local f="${_lex_home}/soul.md" soul=""
+  [[ -s "$f" ]] || return 0
+  soul=$'\n\n# — Soul (dynamic: '"$f"$') —\n'
+  soul+="This block is the hand-maintained personality (tone, style, quirks) — it applies in all modes and overrides the base prompt parts on style conflicts. Changes to the file take effect at the next session / mode switch."$'\n\n'
+  soul+="$(cat "$f" 2>/dev/null)"
+  printf '%s' "$soul"
+}
+
+# ---------------------------------------------------------------------------
 # 5/6 skills (power round 2026-10-08): automatic SKILL.md injection.
 #
 # Every folder under ${_lex_home}/skills/<name>/ holding a SKILL.md ends up in
@@ -976,8 +995,9 @@ setup_messages() {
   # no truncation (before 100 000 bytes → wiki state was cut off).
   local sys stf rc
   # 5/6: skills BEFORE the wiki state — instructions belong at the prompt end,
-  # the wiki excerpt stands behind them as a reference.
-  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)"
+  # the wiki excerpt stands behind them as a reference. The soul (soul.md)
+  # goes last — it is the highest-ranking style layer.
+  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)$(_soul_ex)"
   stf="$(mktemp)" || { log "setup_messages: cannot create temp file"; return 1; }
   if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then rm -f "$stf"; return 1; fi
   _messages="$(jq -c -n --rawfile c "$stf" '[{role:"system",content:$c}]')"
@@ -5060,6 +5080,11 @@ cmd_status() {
     "${_tool_timeout:-?}" "${_tool_max_output:-?}" "${_max_nudges:-?}" "${_approve}" "${_sudo}" "${_autosudo:-0}" "$(_sudo_grant_state)"
   printf '  session   : %s (%s stored sessions)\n' "$sess_state" "$sessions"
   printf '  mem       : %s (%s entries)\n' "$_mem_dir" "$mem_entries"
+  printf '  soul      : %s\n' \
+    "$([[ -s "${_lex_home}/soul.md" ]] \
+      && printf '%s (%s lines, dynamic — takes effect at next session/mode switch)' \
+           "${_lex_home}/soul.md" "$(wc -l < "${_lex_home}/soul.md" | tr -d ' ')" \
+      || printf '%s  (missing — editable personality file)' "${_lex_home}/soul.md")"
   printf '  wiki      : %s%s\n' "$_wiki_dir" "$([[ -d "$_wiki_dir" ]] && echo '' || echo '  (missing, fetch creates it)')"
   printf '  htools    : %s%s\n' "$_htools_dir" "$([[ -d "$_htools_dir" ]] && echo '' || echo '  (missing — mkdir -p)')"
   printf '  hooks     : %s pre, %s post (LEX_HOOKS=%s)\n' \
@@ -5339,7 +5364,10 @@ _swap_slot0() {
     setup_messages   # unreachable in the REPL (slot 0 is always system)
     return 0
   fi
-  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)"
+  # Keep the skills on mode switch too (otherwise they would be gone after
+  # /lexpen or /lexlurk). The soul (soul.md) is ALWAYS re-read here — an
+  # edit takes effect immediately after the mode switch.
+  sys="${_system_prompt}$(_skills_ex)$(_wiki_ex)$(_soul_ex)"
   stf="$(mktemp)" || { echo "❌ cannot create temp file." >&2; return 1; }
   if ! printf '%s' "$sys" > "$stf" 2>/dev/null; then
     rm -f "$stf"; echo "❌ prompt temp file not writable." >&2; return 1

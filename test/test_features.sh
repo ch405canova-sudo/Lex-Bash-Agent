@@ -720,6 +720,34 @@ rm -rf "$TMP/skills"
 assert "skills (after rm: empty again)" "" "$(_skills_ex)"
 
 # ---------------------------------------------------------------------------
+# Soul (2026-10-10): ${LEX_HOME}/soul.md — dynamic personality file, always
+# in the system prompt (all modes), editable without touching the script
+# prompt. Unlike mem/ (pull) it is loaded automatically.
+# ---------------------------------------------------------------------------
+rm -f "$LEX_HOME/soul.md"
+assert "soul (no file: empty)" "" "$(_soul_ex)"
+printf 'Humorous, with emojis. Friendly when in doubt.\n' > "$LEX_HOME/soul.md"
+out="$(_soul_ex)"
+contains "soul (header names the file)" "# — Soul (dynamic: $LEX_HOME/soul.md)" "$out"
+contains "soul (content present)" "Humorous, with emojis." "$out"
+contains "soul (scope note)" "applies in all modes" "$out"
+# Really lands in the system prompt (slot 0) via setup_messages
+setup_messages
+contains "soul (in the system prompt via setup_messages)" "Humorous, with emojis." \
+  "$(jq -r '.[0].content' <<< "$_messages" 2>/dev/null)"
+# Slot-0 switch keeps the soul (fresh file read)
+_system_prompt_default="$_system_prompt"
+_swap_slot0 default >/dev/null 2>&1
+contains "soul (survives slot-0 switch)" "Humorous, with emojis." \
+  "$(jq -r '.[0].content' <<< "$_messages" 2>/dev/null)"
+contains "soul (--status names the line)" "soul" "$("$LEX_BIN" --status 2>&1)"
+# empty file = out (gate is -s, not -f)
+: > "$LEX_HOME/soul.md"
+assert "soul (empty file: empty)" "" "$(_soul_ex)"
+rm -f "$LEX_HOME/soul.md"
+assert "soul (after rm: empty again)" "" "$(_soul_ex)"
+
+# ---------------------------------------------------------------------------
 # 6/6 background tasks (power round 2026-10-08): task(start/status/result/
 # kill/list) — detached run, state readable even without lex.
 # ---------------------------------------------------------------------------

@@ -4,6 +4,27 @@ All notable changes to lex.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [Semantic Versioning](https://semver.org/lang/en/).
 
+## [Unreleased]
+
+### Added 2026-10-10 — Soul: dynamic personality file (`~/.lex/soul.md`)
+
+- **New `_soul_ex()`** loads `~/.lex/soul.md` into the system prompt on
+  every session build and every slot-0 switch (`setup_messages` +
+  `_swap_slot0`), in all modes (standard, `/lexpen`, `/lexlurk`). The file
+  is read freshly each time, so an edit takes effect on the next
+  session/mode-switch without touching `lex` or `LEX.md`. Missing or empty
+  file → prompt unchanged. Soul sits after skills + wiki, i.e. it is the
+  highest-ranking style layer and overrides the base prompt on tone
+  conflicts.
+- **Why** (user report 2026-10-09): a `/lexpen`-mode preference
+  ("answer humorously, with funny emojis") was correctly saved via
+  `mem_add` into `~/.lex/mem/`, but that store is pull-only — the model
+  must call `mem_search`, and across the last five sessions it did so
+  **0 times**. `~/.lex/mem/` stays a pull store; the soul is the push
+  path for durable personality/tone rules.
+- **`--status`** now shows a `soul` line (path + line count + "dynamic",
+  or "missing" hint). Tests +10 (`test_features`).
+
 ## [0.3.0] — 2026-10-09
 
 ### Added 2026-10-09 — Pentest round:3 skills +2 hooks + own MCP server (prompt left untouched)
