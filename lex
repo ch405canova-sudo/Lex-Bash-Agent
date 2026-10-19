@@ -194,7 +194,11 @@ _run_limited() {
   ) >/dev/null 2>&1 &
   wd=$!
   wait "$pid" 2>/dev/null; rc=$?
-  if [[ -s "$dl" ]]; then rc=124; fi                    # eigene Frist = timeout-Returncode
+  # Fund CI 2026-10-19: `-s` (nicht leer) traf NIE zu, weil der Watchdog die
+  # Datei mit `: >` leer anlegt — die Erzwingung war toter Code und der
+  # Rückgabecode kam vom timeout-Backendiend (uutils gibt bei TERM 124, GNU
+  # coreutils 143 → lokal grün, CI rot). `-e` = Frist wurde erreicht.
+  if [[ -e "$dl" ]]; then rc=124; fi                    # eigene Frist = timeout-Returncode
   # Strg+C: der INT-Handler lief während des wait (rc > 128). Ein
   # Hintergrund-Job bekommt SIGINT von der tty nicht mehr (bash setzt es
   # für asynchrone Befehle auf „ignorieren") — deshalb hier explizit.

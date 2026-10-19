@@ -2197,8 +2197,15 @@ assert "env-End-to-End: Wert erreicht den Serverprozess (Kein -a)" "1" \
 LEX_HOME="$_env_dir" _mcp_close 2>/dev/null || true
 
 
+# Isolation (Fund CI 2026-10-19): diese Prüfung las zuvor $HOME/.lex/mcp.json —
+# die Datei existiert nur auf der Entwicklermaschine, im sauberen CI-Lauf fehlt
+# sie und der Check wurde rot (Environment-Leak im Test). Geprüft wird jetzt die
+# MITGELIEFERTE Default-Konfiguration, also genau das, was lex ohne eigene
+# Datei anbietet (desktop.env mit COMPUTER_USE_LINUX_ENABLE_SHELL).
 check "mcp.json env-Block (COMPUTER_USE_LINUX_ENABLE_SHELL)" \
-  "$(jq -e ".desktop.env.COMPUTER_USE_LINUX_ENABLE_SHELL == \"1\"" $HOME/.lex/mcp.json >/dev/null 2>&1 && echo 1 || echo 0)"
+  "$(jq -e '.desktop.env.COMPUTER_USE_LINUX_ENABLE_SHELL == "1"' \
+     <<<"$(LEX_HOME="$TMP/mcp-default-ohne-datei" _mcp_config 2>/dev/null)" \
+     >/dev/null 2>&1 && echo 1 || echo 0)"
 unset _env_fn _env_coproc _envs _env_dir _e
 
 if (( FAIL > 0 )); then
