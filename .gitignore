@@ -1,0 +1,20 @@
+# Laufzeit-Artefakte (gehören nach ~/.lex, nicht ins Repo)
+*.log
+*.tmp
+*.jsonl
+
+# Sicherungskopien (selfcheck/self-edit erzeugt lex.bak, *.bak-<Zeitstempel>)
+lex.bak*
+*.bak
+*.bak-*
+
+# Editor/OS
+*~
+*.swp
+.DS_Store
+
+# Debug-Proxy (tools/llama-proxy.sh)
+.proxy/
+
+# Playwright-MCP-Spielwiese (entsteht bei jedem Browser-Lauf)
+.playwright-mcp/
