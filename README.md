@@ -159,7 +159,7 @@ call:
 | `context7` | `context7` | `~/.local/bin/context7-mcp` |
 
 Locations live in **`~/.lex/mcp.json`** (without that file the defaults
-above, plus `playwright`, `desktop` and `postgres`, apply). `LEX_MCP=0`
+above, plus `playwright` and `desktop`, apply). `LEX_MCP=0`
 disables both tools, `LEX_MCP_TIMEOUT` (default 60 s) caps every call.
 Discovery results are cached in `~/.lex/mcp.cache.json`, so `--status` can
 show the full native tool set.

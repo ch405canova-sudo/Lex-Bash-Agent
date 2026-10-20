@@ -1839,7 +1839,7 @@ contains "markdown (Listenmarker im Renderer)" 'match(l, /^[ \t]*([-*+]|[0-9]+\.
 # Schritt 9 — MCP-Client (defuddle + context7) gegen den Fake-Server
 # ---------------------------------------------------------------------------
 jq -cn --arg f "$SCRIPT_DIR/fake_mcp.sh" \
-  '{defuddle:{command:"bash",args:[$f]}, context7:{command:"bash",args:[$f]}, playwright:{command:"bash",args:[$f]}, desktop:{command:"bash",args:[$f]}, postgres:{command:"bash",args:[$f]}}' \
+  '{defuddle:{command:"bash",args:[$f]}, context7:{command:"bash",args:[$f]}, playwright:{command:"bash",args:[$f]}, desktop:{command:"bash",args:[$f]}}' \
   > "$LEX_HOME/mcp.json"
 
 argv="$(_mcp_argv defuddle)"
@@ -1981,18 +1981,20 @@ contains "browser (dispatch ohne JSON-Objekt Meldung)" "kein JSON-Objekt" "$out"
 
 # Default-Config ohne mcp.json: playwright muss mitgeliefert sein (System-Chrome).
 # Harte Nadel seit 2026-10-13: der Fallback-jq war durch die nachträgliche
-# env-Zeile syntaktisch kaputt (doppelte Keys desktop/postgres, fehlendes
+# env-Zeile syntaktisch kaputt (doppelte Server-Keys statt Komma, fehlendes
 # Komma, `($HOME)` statt `\($h)`) → jq-compile-Fehler, ALLE Server „nicht
 # konfiguriert". Vorher stand hier nur der Kommentar, die Prüfung fehlte.
+# Die private DB-Konfiguration (eigener Server + DSN) liegt bewusst NICHT in
+# der Vorlage — echte Konfiguration immer in ~/.lex/mcp.json (§7/117).
 _fb_dir="$TMP/mcp_default_cfg"
 mkdir -p "$_fb_dir"
 _fb_out="$(LEX_HOME="$_fb_dir" _mcp_config 2>&1)"
 mrc=0
 jq -e '.desktop.env.COMPUTER_USE_LINUX_ENABLE_SHELL == "1"
        and ((.playwright.command // "") | length > 0)
-       and ((.postgres.command // "") | contains("/.lex/pg/dbhub.sh"))' \
+       and ((.postgres // "leer") == "leer")' \
   >/dev/null <<<"$_fb_out" || mrc=$?
-assert "Default-Config ohne mcp.json (gültiges JSON, 5 Server)" "0" "$mrc"
+assert "Default-Config ohne mcp.json (gültiges JSON, 4 Server, keine private DB)" "0" "$mrc"
 argv="$(LEX_HOME="$_fb_dir" _mcp_argv playwright 2>/dev/null)"
 contains "Default-Config (argv playwright = System-Chrome)" "npx" "$argv"
 _fb_dir=""

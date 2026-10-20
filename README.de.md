@@ -165,7 +165,7 @@ Session pro Aufruf:
 | `context7` | `context7` | `~/.local/bin/context7-mcp` |
 
 Die Standorte liegen in **`~/.lex/mcp.json`** (ohne Datei gelten die obigen
-Defaults, dazu `playwright`, `desktop` und `postgres`). `LEX_MCP=0` schaltet
+Defaults, dazu `playwright` und `desktop`). `LEX_MCP=0` schaltet
 beide Tools ab, `LEX_MCP_TIMEOUT` (Standard 60 s) begrenzt jeden Aufruf.
 Discovery-Ergebnisse werden in `~/.lex/mcp.cache.json` gecacht, damit
 `--status` den vollen nativen Tool-Satz zeigen kann.

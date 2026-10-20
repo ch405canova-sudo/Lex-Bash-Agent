@@ -3,6 +3,29 @@
 Alle bemerkenswerten Änderungen, neueste zuerst. Datum = Tag.
 Ältere Releases sind als Git-Tags referenzierbar (`git tag -l`).
 
+## Unreleased
+
+### Geändert
+
+- **Private Datenbank-Anbindung vollständig aus dem öffentlichen Baum entfernt**
+  — sie war Teil der MCP-Default-Vorlage (`_mcp_config`), eines Prompt-Bullets
+  (Server + Zielpfad), der `mcp`-Beispielliste und beider READMEs. Jetzt
+  liegen in der Vorlage **4 Server** (defuddle, context7, playwright, desktop);
+  eine eigene Anbindung konfiguriert jeder selbst unter `~/.lex/mcp.json`. Eine
+  Nadel erzwingt den Zustand: kein Datenbank-Eintrag in der Default-Config.
+- **`tool_bash` nimmt pro Lauf eine Frist** (`timeout`, Sekunden) — die
+  Laufzeit eines Recon-Laufs ist unschätzbar, deshalb gehört die Frist ins
+  Werkzeug (`-maxtime`, `--host-timeout`), wo der Lauf selbst sauber abbricht;
+  der globale Default bleibt Sicherheitsnetz gegen echte Hänger.
+- **Prompt lehrt kein Pipe-Kürzen mehr** — `head` in einer Pipe bricht unter
+  `pipefail` mit rc 141 ab (der folgende Befehl läuft nie) und lässt
+  puffernde Tools auf EPIPE hängen; Kürzen erledigt der Spill.
+- **Frist-Hinweis in `_run_limited` repariert** — die Prüfung lief nach `rm`
+  und prüfte `-s` (toter Code), der Hinweis kam nie an; jetzt davor, `-e`,
+  und der Werkzeug-Output bleibt bei Ablauf erhalten statt überschrieben.
+- **Reasoning wird nie mehr mitten im Satz abgeschnitten** — die Budget-
+  Kappung ist zurückgenommen.
+
 ## v0.4.0 — 2026-10-19
 
 Das deutsche Original ist jetzt die Basis dieser Repository, und die Doku ist
@@ -41,11 +64,11 @@ komplett neu. Alle Zahlen stammen aus einem grünen Lauf der Suite
   Enkel nach rc 124 stundenlang weiter); GNU `timeout` ist nur noch der
   Rückfall
 - **MCP-Default-Konfiguration** ohne `~/.lex/mcp.json` (`_mcp_config`-Fallback:
-  defuddle, context7, playwright, desktop, postgres) plus Discovery-Cache
+  defuddle, context7, playwright, desktop) plus Discovery-Cache
 - **`export -a`-Fehler im Aufbau der Umgebung korrigiert** (Fund: `-a`
   exportierte die falsche Menge)
-- **Postgres-DSN in der Default-Vorlage** ohne Benutzername der Werkstatt
-  (`postgres://lex@…`) — echte Konfiguration liegt in `~/.lex/mcp.json`
+- **Private Datenbank-Anbindung raus aus der Default-Vorlage** — echte
+  Konfiguration liegt immer in `~/.lex/mcp.json`, nie im Baum
 - `test_limits.sh` isoliert: Compaction ist dort kein Testgegenstand mehr
   (`LEX_COMPACT=off`), damit der Läufer unabhängig vom ctx-Default bleibt
 
