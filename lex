@@ -4074,25 +4074,23 @@ _palette_init() {
 }
 _palette_init
 
-# Prompt: nur farbig, wenn die REPL auch wirklich an einem Terminal läuft —
-# sonst stehen die Escapes in Pipes/Logs (P3) — und nie bei NO_COLOR.
-# WICHTIG (Beleg PTY-Test 2026-10-20): die Entscheidung wird beim START
-# gepuffert, weil _prompt in einer Command-Substitution `$(_prompt)` läuft
-# (lex:5685) — deren stdout ist immer eine Pipe, `[[ -t 1 ]]` dort also IMMER
-# falsch. Folge: der farbige Prompt-Label kam seit Einführung nie an (0×
-# Farbcode im PTY-Log, obwohl der Prompt farbig gemeint war).
-_repl_tty=0
-if [[ -t 0 && -t 1 ]]; then _repl_tty=1; fi
-
+# Prompt-Label ist bewusst FARBELOS (§7/120, Klasse „Offset-Fehler bei
+# schmalen Fenstern"): readline behandelt Farbescapes im `read -p`-Prompt als
+# sichtbare Zeichen (+12: ESC[1;92m + ESC[0m), rechnet den Prompt mit Breite
+# 17 statt 5 und zeichnet die Eingabezeile mit falschem Offset neu — tmux-
+# Beweis cols=44: eingefügtes „XX“ rückt um 12 Spalten versetzt ein und
+# überschreibt das „l“ von „lex>“ (User-Report 2026-10-20; dieselbe
+# Offset-Klasse wie der Prompt-Bug vom 2026-10-08). Masken \[ \] helfen hier
+# NICHT — sie blieben im Terminal sichtbar (read -p hat keinen PS1-Decoder,
+# der sie in \001/\002 tauscht); auch \001/\002 (bash's internes Wire-Format)
+# reparierten die Neuzeichnung im Test nicht. Neon-Fett gilt deshalb nur für
+# das EINGABE-ECHO nach ENTER — dort gibt es keine Breitenrechnung, und genau
+# dort will der User seine Eingabe sehen (User-Wunsch 2026-10-20).
 _prompt() {
   # Prompt-Modi: Sternchen = /lexpen.
   local star=""
   [[ -n "${_lexpen_active:-}" ]] && star="*"
-  if [[ "${_repl_tty:-0}" == "1" ]]; then
-    printf '%slex%s>%s ' "$_K_NEONB" "$star" "$_K_RST"
-  else
-    printf 'lex%s> ' "$star"
-  fi
+  printf 'lex%s> ' "$star"
 }
 
 _trace_enabled() {
