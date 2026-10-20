@@ -1777,6 +1777,20 @@ _bt_esc="$(printf '%s\n' "$_prompt_src" | grep -o '\\`' | wc -l | tr -d ' ')"
 assert "prompt (jedes Quell-Backtick escaped)" "$_bt_all" "$_bt_esc"
 
 # ---------------------------------------------------------------------------
+# §7/118 — REPL-Eingabe fett neon-grün + dauerhaft im Verlauf sichtbar.
+# Klasse (§0.1 A.8): die TTY-Entscheidung muss beim START gepuffert sein —
+# _prompt läuft in `$(_prompt)` (lex:5685), deren stdout ist immer eine Pipe,
+# `[[ -t 1 ]]` traf dort also NIE zu. Beweis beim Bauen: 0× Farbcode im
+# PTY-Log, obwohl der Prompt farbig gemeint war.
+# ---------------------------------------------------------------------------
+_p_src="$(sed -n '/^_prompt() {/,/^}/p' "$LEX_BIN")"
+check "prompt-UI (TTY-Entscheidung gepuffert, nicht in \$( ))" "$([[ "$_p_src" == *'_repl_tty'* && "$_p_src" != *'-t 1'* ]] && echo 1 || echo 0)"
+check "prompt-UI (Prompt-Label nutzt Neon-Grün)" "$([[ "$_p_src" == *'$_K_NEONB'* ]] && echo 1 || echo 0)"
+contains "prompt-UI (Neon = bright green + fett, raw, nur bei TTY/ohne NO_COLOR)" "_K_NEONB=\$'\033[1;92m'" "$_p_src$(sed -n '/^_palette_init() {/,/^}/p' "$LEX_BIN")"
+_e_src="$(sed -n '/Eingabe im Verlauf sichtbar/,/_hist_add "\$input"/p' "$LEX_BIN")"
+check "prompt-UI (Eingabe bei TTY ausgegeben, fett neon-grün)" "$([[ "$_e_src" == *'[[ -t 0 ]]'* && "$_e_src" == *'_K_NEONB'* && "$_e_src" == *'$input'* ]] && echo 1 || echo 0)"
+
+# ---------------------------------------------------------------------------
 # Schritt 8 — Rendering: Tabellen, Warnung/Fehler/Links (opencode-artig)
 # ---------------------------------------------------------------------------
 tbl='| Name | Wert |

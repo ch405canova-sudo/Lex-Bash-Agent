@@ -4055,6 +4055,7 @@ _K_CYANB=""
 _K_CYAND=""
 _K_BLUEB=""
 _K_BOLD=""
+_K_NEONB=""
 
 _palette_init() {
   [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]] && return 0
@@ -4066,18 +4067,29 @@ _palette_init() {
   _K_CYAND=$'\033[2;36m'  # ergebnis: Marker
   _K_BLUEB=$'\033[1;34m'  # prompt
   _K_BOLD=$'\033[1m'
+  # Prompt-Label + eigene Eingabe: neon-grün fett (User-Wunsch 2026-10-20).
+  # 92 = bright green, 1 = fett → „neon". Übernimmt _K_BLUEB an beiden Stellen.
+  _K_NEONB=$'\033[1;92m'
   return 0
 }
 _palette_init
 
-# Prompt: nur farbig, wenn stdout ein Terminal ist — sonst steht die
-# Escape-Sequenz in Pipes/Logs (P3) — und nie bei NO_COLOR.
+# Prompt: nur farbig, wenn die REPL auch wirklich an einem Terminal läuft —
+# sonst stehen die Escapes in Pipes/Logs (P3) — und nie bei NO_COLOR.
+# WICHTIG (Beleg PTY-Test 2026-10-20): die Entscheidung wird beim START
+# gepuffert, weil _prompt in einer Command-Substitution `$(_prompt)` läuft
+# (lex:5685) — deren stdout ist immer eine Pipe, `[[ -t 1 ]]` dort also IMMER
+# falsch. Folge: der farbige Prompt-Label kam seit Einführung nie an (0×
+# Farbcode im PTY-Log, obwohl der Prompt farbig gemeint war).
+_repl_tty=0
+if [[ -t 0 && -t 1 ]]; then _repl_tty=1; fi
+
 _prompt() {
   # Prompt-Modi: Sternchen = /lexpen.
   local star=""
   [[ -n "${_lexpen_active:-}" ]] && star="*"
-  if [[ -t 1 ]]; then
-    printf '%slex%s>%s ' "$_K_BLUEB" "$star" "$_K_RST"
+  if [[ "${_repl_tty:-0}" == "1" ]]; then
+    printf '%slex%s>%s ' "$_K_NEONB" "$star" "$_K_RST"
   else
     printf 'lex%s> ' "$star"
   fi
@@ -5695,6 +5707,14 @@ agent_loop() {
     # mit `read -p` zeigt der nächste read den Prompt automatisch.
     # (Spinner-Hardening: verwaistes Kind vorher hart stoppen.)
     [[ -z "$input" ]] && { _spin_stop; continue; }
+    # Eingabe im Verlauf sichtbar (User-Wunsch 2026-10-20 „im Verlauf nicht
+    # mehr zu sehen"): readline zeichnet die Zeile nur beim Tippen, danach
+    # räumt der Turn (Spinner/Reasoning) den Bereich — deshalb hier fest
+    # ausgeben, fett neon-grün, VOR der Turn-Ausgabe. Nur bei TTY: Pipes,
+    # --oneshot und Tests behalten ihre byte-identische stdout-Ausgabe.
+    if [[ -t 0 ]]; then
+      printf '%s%s%s\n' "$_K_NEONB" "$input" "$_K_RST"
+    fi
     _hist_add "$input"
     case "$input" in
       /status) cmd_status ;;
