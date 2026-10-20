@@ -3,6 +3,19 @@
 Alle bemerkenswerten Änderungen, neueste zuerst. Datum = Tag.
 Ältere Releases sind als Git-Tags referenzierbar (`git tag -l`).
 
+## v0.5.1 — 2026-10-20
+
+- **Fix der REPL-Eingabe bei schmalen Fenstern** — nach den
+  Prompt-Optimierungen brach die Eingabezeile bei unzureichend breiten
+  Terminals nicht mehr um und überschrieb sich je nach Fenstergröße.
+  Ursache: readline zählt Farbescapes im `read -p`-Prompt als sichtbare
+  Zeichen (+12), rechnet Prompt-Breite 17 statt 5 und zeichnet die Zeile
+  mit falschem Offset neu (gleiche Offset-Klasse wie der Prompt-Bug vom
+  2026-10-08; bewiesen per gerendertem tmux-Bild, nicht per Byte-Stream).
+  Das Prompt-Label ist wieder schlicht `lex> ` — **fett neon-grün bleibt
+  auf der eingegebenen Zeile nach ENTER**, wo es keine Breitenrechnung
+  gibt und genau dort, wo die Eingabe dauerhaft im Verlauf stehen soll.
+
 ## v0.5.0 — 2026-10-20
 
 Fristen gehören ins Werkzeug, Pipes dürfen nicht kürzen, und die REPL
