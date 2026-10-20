@@ -3,7 +3,11 @@
 Alle bemerkenswerten Änderungen, neueste zuerst. Datum = Tag.
 Ältere Releases sind als Git-Tags referenzierbar (`git tag -l`).
 
-## Unreleased
+## v0.5.0 — 2026-10-20
+
+Fristen gehören ins Werkzeug, Pipes dürfen nicht kürzen, und die REPL
+färbt sich. Alle Zahlen stammen aus einem grünen Lauf der Suite
+(`bash test/run_all.sh` → **15 Läufer, 1077 [PASS], 0 FAIL**).
 
 ### Geändert
 
@@ -25,6 +29,14 @@ Alle bemerkenswerten Änderungen, neueste zuerst. Datum = Tag.
   und der Werkzeug-Output bleibt bei Ablauf erhalten statt überschrieben.
 - **Reasoning wird nie mehr mitten im Satz abgeschnitten** — die Budget-
   Kappung ist zurückgenommen.
+- **REPL-Eingabe fett neon-grün und dauerhaft im Verlauf** — nach ENTER
+  wird die eingegebene Zeile vor der Turn-Ausgabe fest ausgegeben (fett
+  bright green), sodass sie Spinner/Reasoning nicht verliert; Pipes,
+  `--oneshot` und die Suite behalten byte-identische Ausgabe. Dabei kam
+  auch der farbige `lex>`-Prompt-Label zum Vorschein: er war seit
+  Einführung nie angekommen, weil `_prompt` in `$(_prompt)` läuft, deren
+  stdout immer eine Pipe ist — die TTY-Entscheidung wird jetzt beim Start
+  gepuffert.
 
 ## v0.4.0 — 2026-10-19
 
