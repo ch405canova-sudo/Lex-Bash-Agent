@@ -107,6 +107,26 @@ check "§6 O7 (zurück nach der Frist, ${rl_dt}s)" "$([[ "$rl_dt" -le 6 ]] && ec
 check "§6 O7 (Enkelprozess sleep 43 ist tot)" "$(pgrep -f '^sleep 43$' >/dev/null 2>&1 && echo 0 || echo 1)"
 check "§6 O7 (kein Hung-Flag bei sauberem Baum-Kill)" "$([[ -z "${_rl_hung:-}" ]] && echo 1 || echo 0)"
 
+# §6 #55 (2026-10-20) — Pro-Call-Frist für Recon-Läufe: die Laufzeit eines
+# Recon-Werkzeugs ist unschätzbar (Zielgeschwindigkeit, Rate-Limit, Paketverlust),
+# deshalb gehört die Frist ans Werkzeug — tool_bash nimmt sie pro Call an.
+rl_t0=$(date +%s)
+out="$(tool_bash 'sleep 5' 1 2>&1)"
+rl_dt=$(( $(date +%s) - rl_t0 ))
+check "§6 #55 (tool_bash timeout=1 → Exit-Code 124 im Ergebnis)" "$([[ "$out" == *"Exit-Code: 124"* ]] && echo 1 || echo 0)"
+check "§6 #55 (Frist-Meldung nennt die Pro-Call-Frist)" "$([[ "$out" == *"Zeitlimit (1s) erreicht"* ]] && echo 1 || echo 0)"
+# §6 #56 — der Hinweis wird ANGEHÄNGT, der Werkzeug-Output bleibt erhalten:
+# vor dem Fix überschrieb `out=` den ganzen Kind-Output (toter Code hinter dem rm).
+out="$(tool_bash 'echo vorher-lief; sleep 5' 1 2>&1)"
+check "§6 #56 (Werkzeug-Output bleibt bei Frist-Ablauf erhalten)" "$([[ "$out" == *"vorher-lief"* && "$out" == *"Zeitlimit (1s) erreicht"* ]] && echo 1 || echo 0)"
+check "§6 #55 (zurück nach der Pro-Call-Frist, ${rl_dt}s)" "$([[ "$rl_dt" -le 6 ]] && echo 1 || echo 0)"
+out="$(tool_bash 'echo tmo-ignoriert' 0 2>&1)"
+check "§6 #55 (timeout=0 verwirft auf den Default, Lauf läuft)" "$([[ "$out" == *"tmo-ignoriert"* && "$out" != *"Exit-Code:"* ]] && echo 1 || echo 0)"
+out="$(tool_bash 'echo tmo-text' abc 2>&1)"
+check "§6 #55 (timeout=abc verwirft auf den Default)" "$([[ "$out" == *"tmo-text"* && "$out" != *"Exit-Code:"* ]] && echo 1 || echo 0)"
+check "§6 #55 (bash-Schema bietet timeout pro Call an)" "$(grep -q 'timeout:{type:"integer"' "$LEX_BIN" && echo 1 || echo 0)"
+check "§6 #55 (Schema trägt die Nie-raten-Regel)" "$(grep -q 'Recon-Läufe (ffuf, nmap, naabu, nuclei, subfinder, masscan) haben unschätzbare Laufzeit' "$LEX_BIN" && echo 1 || echo 0)"
+
 out="$(_abs_path "$TMP/x.txt")"
 assert "_abs_path (existierende Datei)" "$TMP/x.txt" "$out"
 
@@ -1023,12 +1043,31 @@ contains "--status (Modus=live)" ": live" "$out"
 contains "--status (approve default 0)" "approve: 0" "$out"
 
 # reasoning_budget: adaptiv seit 2026-10-07 (Overthinking-Optimierung nach
-# A/B-Vergleich A0–A3): erster Turn 2048, Folge-Turns 768 — davor standisch
-# 8192, was ~1000 Denk-Tokens auch bei Mini-Turns erzeugte.
+# A/B-Vergleich A0–A3), seit 2026-10-20 (§6 O8) UNBEGRENZT — die Kappung
+# riss das Reasoning mitten im Satz ab. Nadel prüft den Wert, den call_api
+# tatsächlich in den Body schreibt.
 load_config
-assert "reasoning_budget (erster Turn 2048)" "2048" "$_reasoning_budget"
-assert "reasoning_budget_followup (Folge-Turn 768)" "768" "$_reasoning_budget_followup"
-contains "--status (budget 2048)" "2048" "$out"
+assert "reasoning_budget (Default unbegrenzt)" "2147483647" "$_reasoning_budget"
+assert "reasoning_budget_followup (Default unbegrenzt)" "2147483647" "$_reasoning_budget_followup"
+
+# Nadel O8a (2026-10-20): die Defaults dürfen NICHT mehr kappen. Der
+# Request-Wert selbst prüft der Proxy/Test doppelt — hier die Quellstelle,
+# weil der Mock-Pfad ohne Server keinen echten Denktext liefern kann.
+_rb_fallbacks="$(grep -A 24 '^call_api()' "$LEX_BIN" | grep -o '_rb="${_reasoning_budget[^}]*}"')"
+contains "O8a Fallback erster Turn ohne -1/Falltrap" "_rb=\"\${_reasoning_budget:-2147483647}\"" "$_rb_fallbacks"
+contains "O8b Fallback Folge-Turn ohne -1/Falltrap" "_rb=\"\${_reasoning_budget_followup:-2147483647}\"" "$_rb_fallbacks"
+contains "O8c Default-Kommentar nennt die Falltrap" \
+  "ist KEIN unbegrenzt" "$(cat "$LEX_BIN")"
+contains "O8d Defaults sind INT32_MAX" \
+  "_default_reasoning_budget=2147483647" "$(cat "$LEX_BIN")"
+contains "O8e Defaults followup INT32_MAX" \
+  "_default_reasoning_budget_followup=2147483647" "$(cat "$LEX_BIN")"
+
+# Nadel O8f: unbegrenzt darf NICHT als -1 codiert sein — server-common.cpp
+# ließe das still auf das Server-Flag (4096) zurückfallen und der Schnitt
+# bestünde nur mit anderer Zahl weiter.
+assert "O8f Defaults enthalten kein -1 als Unbegrenzt-Wert" "0" \
+  "$([[ "${_reasoning_budget}" == "-1" || "${_reasoning_budget_followup}" == "-1" ]] && echo 1 || echo 0)"
 
 # Hebel 2 (2026-10-07): auto_disable_thinking_with_tools — Default off
 # (Template-Default, unverändertes Verhalten), ENV/Config schalten auf on.
@@ -1706,6 +1745,13 @@ assert "hist (auf 500 Einträge gekürzt)" "500" "$(wc -l < "$_hist_file" | tr -
 contains "perso (Deutsch fix)" "IMMER auf Deutsch" "$_system_prompt"
 contains "perso (nicht raten)" "Nicht raten, nachschlagen" "$_system_prompt"
 contains "perso (--help bei Unsicherheit)" "<Befehl> --help" "$_system_prompt"
+# Klasse §6 #54 (2026-10-20): Pipe-Kürzung unter pipefail — die Nadel prüft die
+# KLASSE, nicht nur die Instanz (Prinzip §0.1 A.8): Vorlage raus, Verweis rein.
+contains "perso (Klasse #54: Verweis auf Pipe-Kürzungsklasse)" "Klasse §6 #54" "$_system_prompt"
+contains "perso (Klasse #54: Hilfe ungeschnitten statt head-30)" "die Hilfe gibst du **ungeschnitten** aus" "$_system_prompt"
+check "perso (Klasse #54: head-30-Vorlage raus aus dem Prompt)" "$([[ "$_system_prompt" != *"--help | head -30"* ]] && echo 1 || echo 0)"
+contains "perso (§6 #55: Recon-Laufzeit nie raten)" "die Dauer eines Recon-Laufs" "$_system_prompt"
+contains "perso (§6 #55: Frist steht im Werkzeug)" "die Frist im Werkzeug selbst" "$_system_prompt"
 contains "perso (Fehler festhalten)" "Fehler sind Material" "$_system_prompt"
 contains "perso (Fehlertexte als Zitate, Repro-Negativkontrolle)" "Fehlertexte sind Zitate" "$_system_prompt"
 contains "prompt (Zentral-venv H-Tools)" "IMMER über \`$HOME/H-Tools/.venv\`" "$_system_prompt"

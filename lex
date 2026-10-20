@@ -210,11 +210,17 @@ _run_limited() {
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   if [[ -s "$flag" ]]; then hung=1; _rl_hung=1; fi
   out="$(cat "$tf" 2>/dev/null)"
-  rm -f "$tf" "$flag" "$dl"
-  if [[ -s "$dl" ]]; then
-    out=$'\n'"Hinweis: Zeitlimit (${secs}s) erreicht — die laufende Prozesskette wurde beendet."
+  # §6 #56 — Prüfung VOR dem rm, mit -e (der Watchdog legt $dl per `: >` leer
+  # an, `-s` traf nie zu — derselbe Fund wie CI 2026-10-19, der nur die erste
+  # Prüfung korrigierte). Und `out+=` statt `out=`: der Werkzeug-Output bleibt
+  # erhalten, der Hinweis wird angehängt — sonst ging bei jedem abgelaufenen
+  # Lauf die komplette Ausgabe verloren und das Modell sah nur „Exit-Code: 124"
+  # ohne jede Erklärung, obwohl die Diagnose-Zeile im Code stand (toter Code).
+  if [[ -e "$dl" ]]; then
+    out+=$'\n'"Hinweis: Zeitlimit (${secs}s) erreicht — die laufende Prozesskette wurde beendet."
     log "_run_limited: Frist ${secs}s erreicht — Kindkette inkl. Enkel beendet"
   fi
+  rm -f "$tf" "$flag" "$dl"
   if (( hung )); then log "_run_limited: Frist ${secs}s+15 — Kindkette überlebte TERM und KILL"; fi
   _rl_out="$out"
   return "$rc"
@@ -248,13 +254,13 @@ _default_max_tokens=16384
 # Budget = Server-Flag aus ai.sh; Request-Feld gewinnt. 2026-09-29 (Live-
 # Review „große Aufgaben"): 8192/4096 kappte sichtbare Antworten bei ~4096
 # Tokens und erzeugte finish=length-Abbrüche → max_tokens 16384.
-# 2026-10-07 (Overthinking-Optimierung, A/B-Vergleich A0–A3): Reasoning-
-# Budgets runter — 8192 pro Turn erzeugte im Schnitt ~1000 Denk-Tokens auch
-# bei Mini-Turns („häng Log ein"), ~50k Denk-Tokens über einen 51-Turn-Lauf.
-# Erster Turn (Planung) denkt weiter aus, Folge-Turns (Tool-Ergebnisse)
-# knapp; harte Grenze mit Budget-Message (ai.sh --reasoning-budget-message).
-_default_reasoning_budget=2048
-_default_reasoning_budget_followup=768
+# 2026-10-07 (Overthinking-Optimierung, A/B A0–A3): 8192 erzeugte ~1000 Denk-
+# Tokens auch bei Mini-Turns, ~50k über 51 Turns → adaptiv 2048/768.
+# 2026-10-20 (§6 O8, §7/114): Kappung ZURÜCKGENOMMEN — 768 riss das Reasoning
+# mitten im Satz ab („Budget erreicht …" — Beleg in §7/114, Projekt-Doku) →
+# INT32_MAX. -1 im Request ist KEIN unbegrenzt (server-common.cpp:1357).
+_default_reasoning_budget=2147483647
+_default_reasoning_budget_followup=2147483647
 # Hebel 2 (Overthinking, 2026-10-07): chat_template_kwargs
 # auto_disable_thinking_with_tools — sobald Tools im Request sind, startet
 # das Template ohne Thinking (chat_template.jinja Z.32). Default off = wie
@@ -638,7 +644,7 @@ Persönlichkeit & Stil:
 _prompt_ops="- **Prüfen tust du mit Tools, nicht im Kopf:** \`bash -n\`, \`./test/run_all.sh\`, \`search\`, \`read_file\` und die Logs sind die Stelle, wo Gewissheit entsteht — nicht das erneute Durchdenken. Ist etwas offen, sage klar als Fakt, was fehlt; das ist ein Befund, keine Unsicherheit.
 - **Denken hat ein Ende:** Prüfe eine Sache höchstens einmal mit einem Tool — kam das Ergebnis, ist es Fakt und nicht Gegenstand weiterer Abwägung; abwägen nur, wenn die erste Prüfung fehlschlug. Kreist der Gedanke (gleicher Punkt zweimal geprüft, Befund nur noch gegengeprüft), ist die Antwort fertig — aussprechen statt weitergrübeln.
 - **Erst liefern, dann verfeinern:** steht das Kern-Deliverable noch aus — Skill, Playbook, Patch, Antwort — kommt zuerst das, auch wenn Details noch Improvisation sind; Reste als offene Punkte benennen statt sie im Schweif zu verfeinern. Wird der Kontext knapp (Token-HUD >80 % oder Budget-Meldungen), verdoppelt sich die Regel: Ergebnis sichern und aussprechen, dann erst Feinschliff — ein fertiger Kern mit Lücken schlägt ein perfektes Teil ohne Ende. **Ausnahme weitwirkende Mutationen (Netzwerk, Firewall, Konfiguration mit Persistenz):** hier schlägt Sorgfalt das Tempo — kurzer Plansatz in einem Satz (kein Genehmigungsprozess, du entscheidest weiter selbst), erst sichern dann mutieren (save/backup) und gegen den Ist-Zustand verifizieren (weitwirkende Mutation ohne gesicherten Ausgangszustand ist nicht umkehrbar).
-- **Nicht raten, nachschlagen:** bei Befehlen und Flags \`bash\` mit \`<Befehl> --help\` — **BEVOR du einen fremden Befehl zum ersten Mal laufen lässt, dessen Flags du nicht SICHER kennst: erst die Hilfe, nie raten**; idealerweise \`<Befehl> --help | head -30 && <Befehl> <richtige flags>\` in EINEM bash-Lauf, damit der richtige Versuch direkt weiterläuft und du keinen Turn zum Raten verlierst. Bei Fakten \`search\` (Projekt und Wiki) oder \`web_search(query)\`/\`web_fetch(url)\`, bei Bibliotheken und Frameworks \`context7(...)\`. Erst wenn die Recherche nichts liefert, sag offen, was du nicht weißt — lieber eine klare Lücke als eine erfundene Antwort.
+- **Nicht raten, nachschlagen:** bei Befehlen und Flags \`bash\` mit \`<Befehl> --help\` — **BEVOR du einen fremden Befehl zum ersten Mal laufen lässt, dessen Flags du nicht SICHER kennst: erst die Hilfe, nie raten**; idealerweise \`<Befehl> --help && <Befehl> <richtige flags>\` in EINEM bash-Lauf, damit der richtige Versuch direkt weiterläuft und du keinen Turn zum Raten verlierst — die Hilfe gibst du **ungeschnitten** aus (das Kürzen deiner Ausgabe übernimmt zentral der Spill, §0.1 C), und du kürzt **nie in die Pipe eines schreibenden Tools** (\`| head\` schließt dem schreibenden Prozess die Pipe: EPIPE/Hang bei pufferausgebenden Tools wie ffuf/nmap, sonst rc 141 unter pipefail, das bricht \`&&\` ab und der richtige Versuch läuft gerade nicht — Klasse §6 #54). Bei Fakten \`search\` (Projekt und Wiki) oder \`web_search(query)\`/\`web_fetch(url)\`, bei Bibliotheken und Frameworks \`context7(...)\`. Erst wenn die Recherche nichts liefert, sag offen, was du nicht weißt — lieber eine klare Lücke als eine erfundene Antwort. **Gleiches gilt für Laufzeiten — nie raten:** die Dauer eines Recon-Laufs hängt von Zielgeschwindigkeit, Rate-Limit und Paketverlust ab und ist damit unschätzbar; deshalb steht die Frist im Werkzeug selbst (\`-maxtime\` bei ffuf, \`--host-timeout\` bei nmap), wo der Lauf sauber abbricht und die Ausgabe vollständig bleibt — nur wenn das Werkzeug keine eigene Frist kann, setzt du mit dem \`timeout\`-Parameter deines bash-Calls bewusst eine großzügige. Der globale Frist-Default ist Sicherheitsnetz gegen echte Hänger, kein Zeitplan für Läufe.
 - **Belegen oder benennen:** Was du weder im Repo noch im Wiki (\`search\`) belegst, holst du mit \`web_search(query)\`/\`web_fetch(url)\` — erst danach ist 'weiß ich nicht' die richtige Antwort. Ein plausibler Einfall ersetzt keine Quelle.
 - **Dein Projekt liegt AUSSCHLIESSLICH in ${_lex_repo_dir}** — dort liegen das Skript, die Projektdoku (README, CHANGELOG) und die Verzeichnisse test/ und tools/. Von dort aus liest, suchst, testest und korrigierst du. Falls im selben übergeordneten Verzeichnis eine externe Push-Kopie des Repos liegt, ist sie nur der Distributionsweg und spielt für den laufenden Betrieb keine Rolle — behandle sie NICHT als Projektstand und greife nie dort an, wenn von 'dem Projekt' die Rede ist. ${_wiki_dir} ist allein Gedächtnis und Log (index/log/errors), nicht das Projekt.
 - **Fehler sind Material:** schlägt etwas fehl, erst die Ursache suchen (\`search\`, Log-Dateien, \`mem_search\` gegen frühere Fehler), dann die Lösung. Die Lösung festhalten: eine Zeile in ${_wiki_dir}/wiki/log.md, bei wiederkehrenden Problemen eine Seite ${_wiki_dir}/wiki/errors/YYYY-MM-DD-<kurz>.md. Beim nächsten Mal zuerst dort nachschauen, statt neu zu erfinden.
@@ -1112,7 +1118,7 @@ _build_tools() {
     {type:"function",function:{name:"read_file",description:"Liest eine Datei und gibt ihren Inhalt zurück.",parameters:{type:"object",properties:{path:{type:"string",description:"Pfad zur Datei"}},required:["path"]}}},
     {type:"function",function:{name:"write_file",description:"Schreibet eine Datei (überschreibt bestehende).",parameters:{type:"object",properties:{path:{type:"string",description:"Pfad zur Datei"},content:{type:"string",description:"Inhalt der Datei"}},required:["path","content"]}}},
     {type:"function",function:{name:"edit_file",description:"Ersetzt das erste Vorkommen eines Textblöcks; mit all:true alle Vorkommen.",parameters:{type:"object",properties:{path:{type:"string",description:"Pfad zur Datei"},old:{type:"string",description:"Alter Textblock"},new:{type:"string",description:"Neuer Textblock"},all:{type:"boolean",description:"Alle Vorkommen ersetzen (Standard false)"}},required:["path","old","new"]}}},
-    {type:"function",function:{name:"bash",description:"Führt eine Shell-Kommando aus und gibt stdout/stderr zurück (harte Deny-Liste; sudo läuft über ein Freigabe-Gate). Der Exit-Code bezieht sich auf die gesamte Kette — Pipes laufen mit pipefail, ein fehlgeschlagenes Glied liefert rc≠0 auch dann, wenn am Ende z. B. tail stand.",parameters:{type:"object",properties:{command:{type:"string",description:"Kommando"}},required:["command"]}}},
+    {type:"function",function:{name:"bash",description:"Führt eine Shell-Kommando aus und gibt stdout/stderr zurück (harte Deny-Liste; sudo läuft über ein Freigabe-Gate). Der Exit-Code bezieht sich auf die gesamte Kette — Pipes laufen mit pipefail, ein fehlgeschlagenes Glied liefert rc≠0 auch dann, wenn am Ende z. B. tail stand.",parameters:{type:"object",properties:{command:{type:"string",description:"Kommando"},timeout:{type:"integer",description:"Sekunden für DIESEN Lauf (sonst gilt der globale Default). Recon-Läufe (ffuf, nmap, naabu, nuclei, subfinder, masscan) haben unschätzbare Laufzeit — schätze NIE: die Frist gehört ins Werkzeug (-maxtime, --host-timeout), wo der Lauf sauber abbricht und die Ausgabe vollständig bleibt; nur wenn das Werkzeug keine eigene Frist kann, setzt du hier bewusst eine großzügige. Werte unter 1 oder nicht-ganzzahlig werden ignoriert."}},required:["command"]}}},
     {type:"function",function:{name:"list_files",description:"Listet Dateien. Ohne Muster wie ls -la; mit pattern/recursive eine Dateiliste.",parameters:{type:"object",properties:{path:{type:"string",description:"Pfad zum Verzeichnis"},pattern:{type:"string",description:"Glob gegen den Dateinamen, z.B. *.md"},recursive:{type:"boolean",description:"Rekursiv durch Unterverzeichnisse (Standard false)"}},required:["path"]}}},
     {type:"function",function:{name:"append_file",description:"Hängt Text ans Ende einer Datei an, ohne zu überschreiben. Für append-only-Dateien wie wiki/log.md.",parameters:{type:"object",properties:{path:{type:"string",description:"Pfad zur Datei"},content:{type:"string",description:"Text, der angehängt wird (eigene Zeile)"}},required:["path","content"]}}},
     {type:"function",function:{name:"search",description:"Sucht in Dateien und gibt Treffer als pfad:zeile:text zurück (locate before you write).",parameters:{type:"object",properties:{query:{type:"string",description:"Suchbegriff"},path:{type:"string",description:"Startpfad: Datei oder Verzeichnis (Standard: das Projekt-Wiki)"},glob:{type:"string",description:"Filter auf Dateinamen, z.B. *.md"},regex:{type:"boolean",description:"true = regulärer Ausdruck, standard false = wörtlich"}},"required":["query"]}}},
@@ -1207,16 +1213,16 @@ _retry_delay() {
 }
 
 call_api() {
-  # Budget pro Turn (2026-10-07, Overthinking-Optimierung): erster Turn
-  # (Planung) erhält $_reasoning_budget, Folge-Turns nur noch
-  # $_reasoning_budget_followup — Tool-Ergebnis-Folgeturns sollen nicht
-  # Minuten lang nachdenken. _rb_override (Compaction: 0) schlägt beides.
+  # Budget pro Turn (2026-10-07 adaptiv; 2026-10-20 §6 O8 unbegrenzt — die
+  # Kappung riss das Denken mitten im Satz ab): erster Turn $_reasoning_budget,
+  # Folge-Turn $_reasoning_budget_followup; wer kappen will, überlagert es.
+  # _rb_override (Compaction/Nudge: 0) schlägt beides.
   local _rb="${_rb_override:-}"
   if [[ -z "${_rb}" ]]; then
     if (( ${_turn_count:-0} <= 0 )); then
-      _rb="${_reasoning_budget:-10}"
+      _rb="${_reasoning_budget:-2147483647}"
     else
-      _rb="${_reasoning_budget_followup:-768}"
+      _rb="${_reasoning_budget_followup:-2147483647}"
     fi
   fi
   _rb_override=""
@@ -1873,6 +1879,14 @@ _sudo_gate() {
 
 tool_bash() {
   local command="$1"
+  # §6 #55 — Pro-Call-Frist: Sekunden für DIESEN Lauf, sonst der globale
+  # Default. Die Dauer eines Recon-Laufs hängt von Zielgeschwindigkeit,
+  # Rate-Limit und Paketverlust ab — sie ist unschätzbar, deshalb gehört
+  # die Frist ans Werkzeug (`-maxtime`, `--host-timeout`), wo der Lauf
+  # selbst sauber abbricht; hierher nur bewusst gesetzt, nie geraten.
+  # Ungültiges/leeres Argument → globaler Default (0 ist niemals sinnvoll).
+  local tmo="${2:-}"
+  [[ "$tmo" =~ ^[1-9][0-9]*$ ]] || tmo=""
   local output rc deny
   deny="$(_bash_denied "$command")"
   if [[ -n "${deny:-}" ]]; then
@@ -1902,7 +1916,7 @@ tool_bash() {
   # tail (immer 0) — das Modell sah „Exit-Code: 0" und schrieb trotz
   # gescheitertem Build „=== ZEEK INSTALLIERT ===". Jetzt meldet die
   # Kette den Fehler des fehlgeschlagenen Glieds.
-  _run_limited "${_tool_timeout:-60}" bash -o pipefail -c "$command"
+  _run_limited "${tmo:-${_tool_timeout:-60}}" bash -o pipefail -c "$command"
   rc=$?
   output="$_rl_out"
   # Brücke Rechte → sudo (Fund 2026-10-08, Session 030808): bei Befehlen
@@ -3896,7 +3910,7 @@ dispatch_tool() {
       ;;
     bash)
       command="$(jq -r '.command // empty' <<< "$args")"
-      tool_bash "$command"
+      tool_bash "$command" "$(jq -r '.timeout // empty' <<< "$args")"
       ;;
     list_files)
       path="$(jq -r '.path // empty' <<< "$args")"
